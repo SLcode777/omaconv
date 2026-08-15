@@ -53,6 +53,7 @@ class TestParsing(Base):
         ))
         s = self.scan()["sessions"][0]
         self.assertEqual(s["title"], "Manual title")
+        self.assertEqual(s["agent"], "claude")
         self.assertEqual(s["titleSource"], "custom")
 
     def test_title_falls_back_to_ai_then_prompt(self):

@@ -154,6 +154,9 @@ def build_session(path, stat, parsed):
     ).isoformat()
     return {
         "id": session_id,
+        # Reserved for multi-agent support (v2): every parser stamps its
+        # agent so the schema never has to break.
+        "agent": "claude",
         "title": title,
         "titleSource": source,
         "cwd": parsed["cwds"][0] if parsed["cwds"] else None,
