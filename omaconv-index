@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""omaconv-index — scans ~/.claude/projects and produces the sessions JSON index.
+
+Output: ~/.local/state/omaconv/index.json (0600) + stdout.
+Incremental: only re-reads files whose mtime or size changed.
+Stdlib only. See PRD.md §4-§6.
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+SCHEMA_VERSION = 1
+TITLE_MAX = 80
+
+
+def default_projects_dir():
+    return os.path.expanduser("~/.claude/projects")
+
+
+def default_state_dir():
+    return os.path.join(
+        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+        "omaconv",
+    )
+
+
+def truncate_title(text):
+    text = " ".join(text.split())
+    if len(text) <= TITLE_MAX:
+        return text
+    cut = text[:TITLE_MAX].rsplit(" ", 1)[0]
+    return (cut or text[:TITLE_MAX]) + "…"
+
+
+def _parse_line(line):
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _str_field(obj, *keys):
+    for key in keys:
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _new_state():
+    return {
+        "customTitle": None,
+        "aiTitle": None,
+        "prompts": [],
+        "cwds": [],
+        "gitBranch": None,
+        "version": None,
+        "lastTimestamp": None,
+        "sidechain": False,
+        "mainline": False,
+    }
+
+
+def _ingest_user(obj, state):
+    cwd = _str_field(obj, "cwd")
+    if cwd and cwd not in state["cwds"]:
+        state["cwds"].append(cwd)
+    branch = _str_field(obj, "gitBranch")
+    if branch:
+        state["gitBranch"] = branch
+    version = _str_field(obj, "version")
+    if version:
+        state["version"] = version
+    side = obj.get("isSidechain")
+    if side is True:
+        state["sidechain"] = True
+    elif side is False:
+        state["mainline"] = True
+
+
+def _ingest(obj, state):
+    kind = obj.get("type")
+    if kind == "last-prompt":
+        prompt = _str_field(obj, "lastPrompt")
+        if prompt:
+            state["prompts"].append(prompt)
+    elif kind == "ai-title":
+        title = _str_field(obj, "aiTitle")
+        if title:
+            state["aiTitle"] = title.strip()
+    elif kind == "custom-title":
+        # Field never observed on this machine: two candidate names.
+        title = _str_field(obj, "customTitle", "title")
+        if title:
+            state["customTitle"] = title.strip()
+    elif kind == "user":
+        _ingest_user(obj, state)
+    ts = _str_field(obj, "timestamp")
+    if ts and (state["lastTimestamp"] is None or ts > state["lastTimestamp"]):
+        state["lastTimestamp"] = ts
+
+
+def parse_transcript(path):
+    """Extract the useful fields from a .jsonl. Tolerant: an unreadable line
+    or a missing field never fails the session (PRD §9)."""
+    state = _new_state()
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            obj = _parse_line(line)
+            if obj is not None:
+                _ingest(obj, state)
+    return {
+        "customTitle": state["customTitle"],
+        "aiTitle": state["aiTitle"],
+        "prompts": state["prompts"],
+        "cwds": state["cwds"],
+        "gitBranch": state["gitBranch"],
+        "version": state["version"],
+        "lastTimestamp": state["lastTimestamp"],
+        "sidechainOnly": state["sidechain"] and not state["mainline"],
+    }
+
+
+def _pick_title(session_id, parsed):
+    if parsed["customTitle"]:
+        return parsed["customTitle"], "custom"
+    if parsed["aiTitle"]:
+        return parsed["aiTitle"], "ai"
+    if parsed["prompts"]:
+        return truncate_title(parsed["prompts"][0]), "prompt"
+    return session_id, "id"
+
+
+def build_session(path, stat, parsed):
+    session_id = os.path.basename(path)[: -len(".jsonl")]
+    title, source = _pick_title(session_id, parsed)
+    last_activity = parsed["lastTimestamp"] or datetime.fromtimestamp(
+        stat.st_mtime, tz=timezone.utc
+    ).isoformat()
+    return {
+        "id": session_id,
+        "title": title,
+        "titleSource": source,
+        "cwd": parsed["cwds"][0] if parsed["cwds"] else None,
+        "cwds": parsed["cwds"],
+        "gitBranch": parsed["gitBranch"],
+        "version": parsed["version"],
+        "lastActivity": last_activity,
+        "prompts": parsed["prompts"],
+        "transcriptPath": path,
+        "sourceMtime": stat.st_mtime,
+        "sourceSize": stat.st_size,
+        "sidechainOnly": parsed["sidechainOnly"],
+    }
+
+
+def _project_transcripts(project):
+    try:
+        entries = os.listdir(project)
+    except OSError:
+        return
+    for entry in entries:
+        if entry.endswith(".jsonl"):
+            full = os.path.join(project, entry)
+            if os.path.isfile(full):
+                yield full
+
+
+def list_transcripts(projects_dir):
+    """The .jsonl files at the root of each project dir — never the
+    subdirectories (subagents/, PRD §9)."""
+    paths = []
+    try:
+        project_dirs = os.listdir(projects_dir)
+    except OSError:
+        return paths
+    for name in project_dirs:
+        project = os.path.join(projects_dir, name)
+        if os.path.isdir(project):
+            paths.extend(_project_transcripts(project))
+    return paths
+
+
+def _session_for(path, cached):
+    """Reuse the cached entry if mtime and size are unchanged,
+    otherwise re-read the transcript."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    prev = cached.get(path)
+    if (
+        prev
+        and prev.get("sourceMtime") == stat.st_mtime
+        and prev.get("sourceSize") == stat.st_size
+    ):
+        return prev
+    parsed = parse_transcript(path)
+    if parsed is None:
+        return None
+    return build_session(path, stat, parsed)
+
+
+def scan(projects_dir, previous=None):
+    """Build the index, incrementally when `previous` (the prior index) is given."""
+    cached = {}
+    if previous:
+        for session in previous.get("sessions", []):
+            if isinstance(session, dict) and session.get("transcriptPath"):
+                cached[session["transcriptPath"]] = session
+
+    sessions = []
+    for path in list_transcripts(projects_dir):
+        session = _session_for(path, cached)
+        if session is None or session.get("sidechainOnly"):
+            continue
+        session["cwdExists"] = bool(session.get("cwd")) and os.path.isdir(session["cwd"])
+        sessions.append(session)
+
+    sessions.sort(key=lambda s: s.get("lastActivity") or "", reverse=True)
+    return {"schemaVersion": SCHEMA_VERSION, "sessions": sessions}
+
+
+def load_cache(state_dir):
+    try:
+        with open(os.path.join(state_dir, "index.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("schemaVersion") == SCHEMA_VERSION:
+        return data
+    return None
+
+
+def write_cache(state_dir, index):
+    """Atomic write, 0600 — the cache holds conversation excerpts (PRD §10)."""
+    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    target = os.path.join(state_dir, "index.json")
+    tmp = target + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(index, fh, ensure_ascii=False)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, target)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--projects-dir", default=default_projects_dir())
+    parser.add_argument("--state-dir", default=default_state_dir())
+    parser.add_argument("--full", action="store_true", help="ignore the cache, re-read everything")
+    parser.add_argument("--quiet", action="store_true", help="write nothing to stdout")
+    args = parser.parse_args(argv)
+
+    previous = None if args.full else load_cache(args.state_dir)
+    index = scan(args.projects_dir, previous)
+    write_cache(args.state_dir, index)
+    if not args.quiet:
+        json.dump(index, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
