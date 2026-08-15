@@ -39,9 +39,9 @@ Item {
   readonly property string grepperPath: pluginFile("omaconv-grep")
   readonly property string titlerPath: pluginFile("omaconv-set-title")
 
-  // Two-step delete: first Ctrl+D arms this with the session id, the
-  // second one trashes; any other key disarms.
-  property string confirmDeleteId: ""
+  // Delete confirmation modal: Ctrl+D stores the target here, ↵ (or
+  // Ctrl+D again) confirms, esc cancels.
+  property var confirmDeleteSession: null
 
   // UI preferences (pins, renames): ours, stored in stateDir — Claude's
   // transcript files are never written to.
@@ -100,7 +100,7 @@ Item {
     root.opened = true
     root.filterText = ""
     root.selectedIndex = 0
-    root.confirmDeleteId = ""
+    root.confirmDeleteSession = null
     root.rebuild()
     // Freshness (PRD §6): show the cache instantly, reindex in the
     // background, let the FileView reload if anything changed.
@@ -287,12 +287,13 @@ Item {
 
   function requestDelete(index) {
     var s = root.sessionAt(index)
-    if (!s) return
-    if (root.confirmDeleteId !== s.id) {
-      root.confirmDeleteId = s.id
-      return
-    }
-    root.confirmDeleteId = ""
+    if (s) root.confirmDeleteSession = s
+  }
+
+  function confirmDelete() {
+    var s = root.confirmDeleteSession
+    root.confirmDeleteSession = null
+    if (!s || !s.transcriptPath) return
     // To the trash, never rm — recoverable. The session subdir (subagents)
     // may not exist; gio processes each argument independently.
     trasher.command = ["gio", "trash",
@@ -476,7 +477,13 @@ Item {
             return
           }
           var isDeleteChord = event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier
-          if (root.confirmDeleteId && !isDeleteChord) root.confirmDeleteId = ""
+          if (root.confirmDeleteSession) {
+            if (event.key === Qt.Key_Escape) root.confirmDeleteSession = null
+            else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || isDeleteChord)
+              root.confirmDelete()
+            event.accepted = true
+            return
+          }
           if (isDeleteChord) {
             root.requestDelete(root.selectedIndex)
             event.accepted = true
@@ -894,8 +901,6 @@ Item {
             textFormat: Text.StyledText
             text: root.renameActive
               ? root.dimText("renaming…")
-              : root.confirmDeleteId
-              ? root.footerHints([["ctrl+d", "again to move this conversation to the trash — any other key cancels"]])
               : (root.skillMode
                 ? root.footerHints([["↵", "open SKILL.md"], ["ctrl+↵", "copy /name"], ["esc", "back"]])
                 : root.footerHints([["↵", "resume"], ["ctrl+↵", "copy command"], ["ctrl+k", "all shortcuts"], ["/", "skills"]]))
@@ -904,6 +909,76 @@ Item {
             font.pixelSize: Style.font.title
             elide: Text.ElideRight
           }
+        }
+      }
+    }
+
+    // Delete confirmation modal (Ctrl+D).
+    BorderSurface {
+      visible: root.confirmDeleteSession !== null
+      width: Math.min(Style.space(720), panel.width - Style.gapsOut * 2)
+      height: deleteCol.height + Style.space(64)
+      radius: root.cornerRadius
+      anchors.centerIn: parent
+      color: root.background
+      borderSpec: root.borderSpec
+      padding: Style.space(24)
+
+      Column {
+        id: deleteCol
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Style.space(32)
+        anchors.rightMargin: Style.space(32)
+        spacing: Style.spacing.lg
+
+        Text {
+          width: parent.width
+          text: "DELETE CONVERSATION — ARE YOU SURE?"
+          color: root.foreground
+          opacity: 0.4
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.letterSpacing: 2
+        }
+
+        Text {
+          width: parent.width
+          text: root.confirmDeleteSession ? (root.confirmDeleteSession.title || root.confirmDeleteSession.id) : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.fontPx(1.5)
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          text: root.confirmDeleteSession ? root.subtitleFor(root.confirmDeleteSession) : ""
+          color: root.foreground
+          opacity: 0.58
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          text: "The transcript moves to the trash — recoverable from Files."
+          color: root.foreground
+          opacity: 0.75
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          wrapMode: Text.Wrap
+        }
+
+        Text {
+          width: parent.width
+          textFormat: Text.StyledText
+          text: root.footerHints([["↵", "delete"], ["esc", "cancel"]])
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
         }
       }
     }
@@ -948,7 +1023,7 @@ Item {
             { key: "ctrl+o",  what: "open a terminal in its directory" },
             { key: "ctrl+t",  what: "reveal the transcript in Files" },
             { key: "ctrl+g",  what: "search inside the transcript" },
-            { key: "ctrl+d",  what: "delete to trash (press twice)" },
+            { key: "ctrl+d",  what: "delete to trash (asks to confirm)" },
             { key: "/",       what: "skills namespace" },
             { key: "esc",     what: "clear search, then close" }
           ]
