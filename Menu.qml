@@ -42,6 +42,10 @@ Item {
   // second one trashes; any other key disarms.
   property string confirmDeleteId: ""
 
+  // UI preferences (pins, later renames): ours, stored in stateDir —
+  // Claude's transcript files are never written to.
+  property var prefs: ({})
+
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
   // the menu style this palette too.
   property color background: Color.menu.background
@@ -120,16 +124,60 @@ Item {
     root.rebuild()
   }
 
-  // Empty query: the 10 most recent (PRD F2). Otherwise search all three
-  // fields, capped at 50 rows. Leading "/": skills namespace instead.
+  // Empty query: pinned + the 10 most recent (PRD F2). Otherwise search
+  // all three fields, capped at 50 rows. Leading "/": skills namespace.
   function rebuild() {
     var out
     if (root.skillMode)
       out = Search.searchSkills(root.preparedSkills, root.filterText.substring(1), 50)
+    else if (root.filterText)
+      out = Search.search(root.prepared, root.filterText, 50)
     else
-      out = Search.search(root.prepared, root.filterText, root.filterText ? 50 : 10)
+      out = Search.recentRows(root.prepared, root.prefs.pinned || [], 10)
     root.results = out
-    if (root.selectedIndex >= out.length) root.selectedIndex = Math.max(0, out.length - 1)
+    if (root.selectedIndex >= out.length || root.selectedIndex < 0
+        || (out[root.selectedIndex] && out[root.selectedIndex].header !== undefined))
+      root.selectedIndex = root.firstSelectable()
+  }
+
+  function firstSelectable() {
+    for (var i = 0; i < root.results.length; i++)
+      if (root.results[i].header === undefined) return i
+    return 0
+  }
+
+  function loadPrefs(raw) {
+    var parsed = null
+    try { parsed = JSON.parse(raw) } catch (e) { /* first run or corrupt: defaults */ }
+    root.prefs = (parsed && typeof parsed === "object") ? parsed : {}
+    root.rebuild()
+  }
+
+  function savePrefs() {
+    prefsFile.setText(JSON.stringify(root.prefs))
+  }
+
+  function togglePin(index) {
+    var s = root.sessionAt(index)
+    if (!s) return
+    var arr = (root.prefs.pinned || []).slice()
+    var at = arr.indexOf(s.id)
+    if (at === -1) arr.push(s.id)
+    else arr.splice(at, 1)
+    var next = {}
+    for (var k in root.prefs) next[k] = root.prefs[k]
+    next.pinned = arr
+    root.prefs = next
+    root.savePrefs()
+    root.rebuild()
+    // Keep the cursor on the same conversation after it moved section.
+    for (var i = 0; i < root.results.length; i++) {
+      if (root.results[i].session && root.results[i].session.id === s.id) {
+        root.selectedIndex = i
+        resultList.positionViewAtIndex(i, ListView.Contain)
+        break
+      }
+    }
   }
 
   function skillAt(index) {
@@ -157,8 +205,16 @@ Item {
   }
 
   function select(delta) {
-    if (root.results.length === 0) return
-    root.selectedIndex = (root.selectedIndex + delta + root.results.length) % root.results.length
+    var n = root.results.length
+    if (n === 0) return
+    var i = root.selectedIndex
+    for (var step = 0; step < n; step++) {
+      i = (i + delta + n) % n
+      if (root.results[i].header === undefined) {
+        root.selectedIndex = i
+        break
+      }
+    }
     resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
   }
 
@@ -279,6 +335,12 @@ Item {
   }
 
   FileView {
+    id: prefsFile
+    path: root.stateDir + "/prefs.json"
+    onLoaded: root.loadPrefs(text())
+  }
+
+  FileView {
     id: indexFile
     path: root.stateDir + "/index.json"
     watchChanges: true
@@ -362,6 +424,9 @@ Item {
           } else if (event.key === Qt.Key_G && event.modifiers === Qt.ControlModifier) {
             root.grepTranscript(root.selectedIndex)
             event.accepted = true
+          } else if (event.key === Qt.Key_P && event.modifiers === Qt.ControlModifier) {
+            root.togglePin(root.selectedIndex)
+            event.accepted = true
           } else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
             root.setFilter(root.filterText + event.text)
             event.accepted = true
@@ -419,9 +484,11 @@ Item {
         }
 
         // Section label, small caps (design-inspo/raindrop, PRD §7 mock).
+        // Empty query: sections come inline from recentRows() instead.
         Text {
+          visible: root.skillMode || root.filterText !== ""
           width: parent.width
-          text: root.skillMode ? "SKILLS" : (root.filterText ? "RESULTS" : "RECENT")
+          text: root.skillMode ? "SKILLS" : "RESULTS"
           color: root.foreground
           opacity: 0.4
           font.family: root.fontFamily
@@ -449,18 +516,34 @@ Item {
             required property int index
             required property var modelData
 
+            readonly property bool isHeader: modelData.header !== undefined
             readonly property bool isSkill: modelData.skill !== undefined
             readonly property var session: modelData.session || null
-            readonly property bool current: index === root.selectedIndex
+            readonly property bool current: !isHeader && index === root.selectedIndex
             readonly property bool resumable: isSkill || !!(session && session.resumeCwd)
             readonly property bool hasExcerpt: !isSkill && modelData.excerpt !== null && modelData.excerpt !== undefined
             // Narrow-screen preview: two extra lines under the selected row.
             readonly property bool inlinePreview: !isSkill && current && !root.widePreview
 
             width: resultList.width
-            height: contentCol.height + Style.space(22)
+            height: isHeader ? headerLabel.height + Style.space(18) : contentCol.height + Style.space(22)
             radius: root.cornerRadius
             color: current ? root.selectedBackground : "transparent"
+
+            // Section label row (PINNED / RECENT): not selectable.
+            Text {
+              id: headerLabel
+              visible: row.isHeader
+              anchors.left: parent.left
+              anchors.bottom: parent.bottom
+              anchors.bottomMargin: Style.space(4)
+              text: row.isHeader ? modelData.header : ""
+              color: root.foreground
+              opacity: 0.4
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.letterSpacing: 2
+            }
 
             // Accent bar on the selected row (design-inspo).
             Rectangle {
@@ -476,6 +559,7 @@ Item {
 
             Column {
               id: contentCol
+              visible: !row.isHeader
               anchors.left: parent.left
               anchors.right: returnHint.left
               anchors.leftMargin: Style.space(18)
@@ -485,7 +569,8 @@ Item {
 
               Text {
                 width: parent.width
-                text: row.isSkill ? "/" + row.modelData.skill.name : (row.session.title || row.session.id)
+                text: row.isSkill ? "/" + row.modelData.skill.name
+                  : (row.session ? (row.session.title || row.session.id) : "")
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 1 : 0.4
                 font.family: root.fontFamily
@@ -497,7 +582,7 @@ Item {
                 width: parent.width
                 text: row.isSkill
                   ? root.homeAbbrev(row.modelData.skill.dir) + "  ·  " + (row.modelData.skill.description || "—")
-                  : root.subtitleFor(row.session)
+                  : (row.session ? root.subtitleFor(row.session) : "")
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 0.58 : 0.3
                 font.family: root.fontFamily
@@ -561,7 +646,8 @@ Item {
 
             MouseArea {
               anchors.fill: parent
-              hoverEnabled: true
+              enabled: !row.isHeader
+              hoverEnabled: !row.isHeader
               cursorShape: row.resumable ? Qt.PointingHandCursor : Qt.ArrowCursor
               onContainsMouseChanged: if (containsMouse) root.selectedIndex = row.index
               onClicked: row.isSkill ? root.openSkill(row.index) : root.resumeIndex(row.index)
@@ -718,7 +804,7 @@ Item {
               ? "ctrl+d again to move this conversation to the trash — any other key cancels"
               : (root.skillMode
                 ? "↵ open SKILL.md    ctrl+↵ copy /name    esc back"
-                : "↵ resume    ctrl+↵ copy command    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete    / skills")
+                : "↵ resume    ctrl+↵ copy    ctrl+p pin/unpin    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete    / skills")
             color: root.foreground
             opacity: root.confirmDeleteId ? 0.9 : 0.45
             font.family: root.fontFamily

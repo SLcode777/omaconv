@@ -84,6 +84,27 @@ function buildExcerpt(prompt, start, length) {
   }
 }
 
+// Empty-query view: pinned sessions first, then the `limit` most recent
+// unpinned ones. Header rows ({header: "..."}) are rendered as section
+// labels and skipped by selection.
+function recentRows(prepared, pinnedIds, limit) {
+  var pinnedSet = {}
+  for (var p = 0; p < (pinnedIds || []).length; p++) pinnedSet[pinnedIds[p]] = true
+  var pinned = []
+  var recent = []
+  for (var i = 0; i < prepared.length; i++) {
+    var session = prepared[i].session
+    if (pinnedSet[session.id]) pinned.push({ session: session, score: 0, excerpt: null })
+    else if (recent.length < limit) recent.push({ session: session, score: 0, excerpt: null })
+  }
+  var rows = []
+  if (pinned.length) rows.push({ header: "PINNED" })
+  rows.push.apply(rows, pinned)
+  if (recent.length) rows.push({ header: "RECENT" })
+  rows.push.apply(rows, recent)
+  return rows
+}
+
 // query "" → the `limit` most recent sessions (PRD F2).
 // Otherwise: every term must match somewhere; score is the sum of the
 // best field score per term; ties break on recency.

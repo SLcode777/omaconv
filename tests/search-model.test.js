@@ -159,6 +159,22 @@ test("skill search: name outranks description, empty query lists all", () => {
   assert.equal(Array.prototype.map.call(out, r => r.skill.name).join(","), "omarchy,sonar-check")
 })
 
+test("recentRows: pinned first with headers, limit only caps recents", () => {
+  const prepared = model.prepare([
+    session({ id: "a" }), session({ id: "b" }), session({ id: "c" }), session({ id: "d" })
+  ])
+  const rows = model.recentRows(prepared, ["c"], 2)
+  const shape = Array.prototype.map.call(rows, r => r.header || r.session.id).join(",")
+  assert.equal(shape, "PINNED,c,RECENT,a,b")
+})
+
+test("recentRows: no pins means a single RECENT section", () => {
+  const prepared = model.prepare([session({ id: "a" })])
+  const rows = model.recentRows(prepared, [], 10)
+  assert.equal(Array.prototype.map.call(rows, r => r.header || r.session.id).join(","), "RECENT,a")
+  assert.equal(model.recentRows(model.prepare([]), null, 10).length, 0)
+})
+
 test("prepare tolerates malformed sessions", () => {
   const prepared = model.prepare([null, "junk", session({ id: "ok", prompts: null, title: null, cwd: null })])
   assert.equal(prepared.length, 1)
