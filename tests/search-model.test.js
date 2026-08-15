@@ -159,20 +159,38 @@ test("skill search: name outranks description, empty query lists all", () => {
   assert.equal(Array.prototype.map.call(out, r => r.skill.name).join(","), "omarchy,sonar-check")
 })
 
-test("recentRows: pinned first with headers, limit only caps recents", () => {
-  const prepared = model.prepare([
-    session({ id: "a" }), session({ id: "b" }), session({ id: "c" }), session({ id: "d" })
-  ])
-  const rows = model.recentRows(prepared, ["c"], 2)
-  const shape = Array.prototype.map.call(rows, r => r.header || r.session.id).join(",")
-  assert.equal(shape, "PINNED,c,RECENT,a,b")
+// Fixed "now": 2026-08-15 15:00 local time.
+const NOW = new Date(2026, 7, 15, 15, 0, 0).getTime()
+
+function atLocal(y, mo, d, h) {
+  return new Date(y, mo, d, h, 0, 0).toISOString()
+}
+
+test("sectionFor buckets by local calendar day", () => {
+  assert.equal(model.sectionFor(atLocal(2026, 7, 15, 9), NOW), "TODAY")
+  assert.equal(model.sectionFor(atLocal(2026, 7, 14, 23), NOW), "YESTERDAY")
+  assert.equal(model.sectionFor(atLocal(2026, 7, 10, 12), NOW), "THIS WEEK")
+  assert.equal(model.sectionFor(atLocal(2026, 7, 1, 12), NOW), "OLDER")
+  assert.equal(model.sectionFor(null, NOW), "OLDER")
+  assert.equal(model.sectionFor("garbage", NOW), "OLDER")
 })
 
-test("recentRows: no pins means a single RECENT section", () => {
-  const prepared = model.prepare([session({ id: "a" })])
-  const rows = model.recentRows(prepared, [], 10)
-  assert.equal(Array.prototype.map.call(rows, r => r.header || r.session.id).join(","), "RECENT,a")
-  assert.equal(model.recentRows(model.prepare([]), null, 10).length, 0)
+test("recentRows: pinned first, then date sections, limit caps recents", () => {
+  const prepared = model.prepare([
+    session({ id: "today1", lastActivity: atLocal(2026, 7, 15, 12) }),
+    session({ id: "today2", lastActivity: atLocal(2026, 7, 15, 8) }),
+    session({ id: "yday", lastActivity: atLocal(2026, 7, 14, 12) }),
+    session({ id: "week", lastActivity: atLocal(2026, 7, 11, 12) }),
+    session({ id: "old", lastActivity: atLocal(2026, 6, 1, 12) }),
+    session({ id: "pinned1", lastActivity: atLocal(2026, 7, 13, 12) })
+  ])
+  const rows = model.recentRows(prepared, ["pinned1"], 4, NOW)
+  const shape = Array.prototype.map.call(rows, r => r.header || r.session.id).join(",")
+  assert.equal(shape, "PINNED,pinned1,TODAY,today1,today2,YESTERDAY,yday,THIS WEEK,week")
+})
+
+test("recentRows: empty input yields no rows", () => {
+  assert.equal(model.recentRows(model.prepare([]), null, 10, NOW).length, 0)
 })
 
 test("prepare tolerates malformed sessions", () => {

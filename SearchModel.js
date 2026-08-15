@@ -84,24 +84,49 @@ function buildExcerpt(prompt, start, length) {
   }
 }
 
+var DAY_MS = 86400000
+
+// Relative date section for a session, local calendar days (timestamps
+// are UTC in the transcripts). THIS WEEK = the last 7 days.
+function sectionFor(iso, nowMs) {
+  var t = iso ? new Date(iso).getTime() : NaN
+  if (isNaN(t)) return "OLDER"
+  var now = new Date(nowMs)
+  var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  if (t >= startToday) return "TODAY"
+  if (t >= startToday - DAY_MS) return "YESTERDAY"
+  if (t >= startToday - 6 * DAY_MS) return "THIS WEEK"
+  return "OLDER"
+}
+
 // Empty-query view: pinned sessions first, then the `limit` most recent
-// unpinned ones. Header rows ({header: "..."}) are rendered as section
-// labels and skipped by selection.
-function recentRows(prepared, pinnedIds, limit) {
+// unpinned ones grouped by relative date. Header rows ({header: "..."})
+// are rendered as section labels and skipped by selection.
+function recentRows(prepared, pinnedIds, limit, nowMs) {
   var pinnedSet = {}
   for (var p = 0; p < (pinnedIds || []).length; p++) pinnedSet[pinnedIds[p]] = true
+  var rows = []
   var pinned = []
-  var recent = []
+  var recentCount = 0
+  var lastSection = null
+  var recentRowsOut = []
   for (var i = 0; i < prepared.length; i++) {
     var session = prepared[i].session
-    if (pinnedSet[session.id]) pinned.push({ session: session, score: 0, excerpt: null })
-    else if (recent.length < limit) recent.push({ session: session, score: 0, excerpt: null })
+    if (pinnedSet[session.id]) {
+      pinned.push({ session: session, score: 0, excerpt: null })
+    } else if (recentCount < limit) {
+      var section = sectionFor(session.lastActivity, nowMs)
+      if (section !== lastSection) {
+        recentRowsOut.push({ header: section })
+        lastSection = section
+      }
+      recentRowsOut.push({ session: session, score: 0, excerpt: null })
+      recentCount++
+    }
   }
-  var rows = []
   if (pinned.length) rows.push({ header: "PINNED" })
   rows.push.apply(rows, pinned)
-  if (recent.length) rows.push({ header: "RECENT" })
-  rows.push.apply(rows, recent)
+  rows.push.apply(rows, recentRowsOut)
   return rows
 }
 

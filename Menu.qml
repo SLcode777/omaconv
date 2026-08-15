@@ -144,7 +144,7 @@ Item {
     else if (root.filterText)
       out = Search.search(root.prepared, root.filterText, 50)
     else
-      out = Search.recentRows(root.prepared, root.prefs.pinned || [], 10)
+      out = Search.recentRows(root.prepared, root.prefs.pinned || [], 10, Date.now())
     root.results = out
     if (root.selectedIndex >= out.length || root.selectedIndex < 0
         || (out[root.selectedIndex] && out[root.selectedIndex].header !== undefined))
