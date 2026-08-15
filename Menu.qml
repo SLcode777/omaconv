@@ -301,7 +301,7 @@ Item {
     trasher.running = true
   }
 
-  function resumeIndex(index) {
+  function resumeIndex(index, fork) {
     var s = root.sessionAt(index)
     if (!s) return
     // resumeCwd: the session's home dir, or the most recent surviving cwd
@@ -310,11 +310,15 @@ Item {
     root.dismiss()
     // Argument array, never an interpolated shell string: cwd and id come
     // from disk and are untrusted data (PRD §10).
-    Quickshell.execDetached([
+    var cmd = [
       "setsid", "uwsm-app", "--",
       "xdg-terminal-exec", "--dir=" + s.resumeCwd,
       "claude", "--resume", s.id
-    ])
+    ]
+    // Fork: inherit the context in a NEW session id, the original stays
+    // untouched.
+    if (fork) cmd.push("--fork-session")
+    Quickshell.execDetached(cmd)
   }
 
   function homeAbbrev(path) {
@@ -496,7 +500,7 @@ Item {
             } else if (event.modifiers & Qt.ControlModifier) {
               root.copyCommand(root.selectedIndex)
             } else {
-              root.resumeIndex(root.selectedIndex)
+              root.resumeIndex(root.selectedIndex, (event.modifiers & Qt.AltModifier) !== 0)
             }
             event.accepted = true
           } else if (event.key === Qt.Key_O && event.modifiers === Qt.ControlModifier) {
@@ -937,6 +941,7 @@ Item {
         Repeater {
           model: [
             { key: "↵",       what: "resume in its directory" },
+            { key: "alt+↵",   what: "resume as a fork (new session, same context)" },
             { key: "ctrl+↵",  what: "copy the resume command" },
             { key: "ctrl+p",  what: "pin / unpin" },
             { key: "ctrl+r",  what: "rename" },
