@@ -36,6 +36,7 @@ Item {
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
   // the menu style this palette too.
   property color background: Color.menu.background
+  property real cardOpacity: 0.92
   property color foreground: Color.menu.text
   property color borderColor: Color.menu.border
   property var borderSpec: Border.surfaceSpec("menu", "border", borderColor, Math.max(1, Style.space(2)))
@@ -44,14 +45,19 @@ Item {
   property color selectedText: Color.menu.selectedText
   readonly property int cornerRadius: Style.cornerRadius
   property string fontFamily: Style.font.menuFamily
-  property int contentMargin: Style.spacing.panelPadding
-  property int rowHeight: Style.space(44)
+  // Airy layout, design-inspo/raindrop: the palette takes ~2/3 of the
+  // screen, wide margins, roomy rows.
+  property int contentMargin: Style.space(28)
   // Preview (PRD F4): side pane when the screen is wide enough, otherwise
   // two extra lines under the selected row.
   readonly property bool widePreview: panel.width >= Style.space(1000)
-  property int previewWidth: Style.space(300)
-  property int cardWidth: Math.min(widePreview ? Style.space(900) : Style.space(560), panel.width - Style.gapsOut * 2)
-  property int cardHeight: Math.min(Style.space(520), panel.height - Style.gapsOut * 2)
+  property int previewWidth: Style.space(340)
+  property int cardWidth: Math.min(
+    Math.max(Style.space(680), Math.round(panel.width * (widePreview ? 0.66 : 0.55))),
+    panel.width - Style.gapsOut * 2, Style.space(1180))
+  property int cardHeight: Math.min(
+    Math.max(Style.space(480), Math.round(panel.height * 0.68)),
+    panel.height - Style.gapsOut * 2)
 
   readonly property var selectedSession: (root.results.length > 0
     && root.selectedIndex >= 0 && root.selectedIndex < root.results.length)
@@ -234,7 +240,7 @@ Item {
       height: root.cardHeight
       radius: root.cornerRadius
       anchors.centerIn: parent
-      color: root.background
+      color: Qt.alpha(root.background, root.cardOpacity)
       borderSpec: root.borderSpec
       padding: root.contentMargin
 
@@ -285,14 +291,56 @@ Item {
         anchors.leftMargin: card.contentLeftInset
         spacing: Style.spacing.md
 
+        // Search line + esc badge (design-inspo/hark, PRD §7 mock).
+        Item {
+          width: parent.width
+          height: Math.max(Style.fontPx(1.5) + Style.space(8), escBadge.height)
+
+          Text {
+            anchors.left: parent.left
+            anchors.right: escBadge.left
+            anchors.rightMargin: Style.spacing.md
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.filterText || ("Search " + root.sessions.length + " conversations…")
+            color: root.foreground
+            opacity: root.filterText ? 1 : 0.5
+            font.family: root.fontFamily
+            font.pixelSize: Style.fontPx(1.5)
+            elide: Text.ElideRight
+          }
+
+          Rectangle {
+            id: escBadge
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: escText.width + Style.space(16)
+            height: escText.height + Style.space(8)
+            radius: Style.space(4)
+            color: "transparent"
+            border.color: root.foreground
+            border.width: 1
+            opacity: 0.35
+
+            Text {
+              id: escText
+              anchors.centerIn: parent
+              text: "esc"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+        }
+
+        // Section label, small caps (design-inspo/raindrop, PRD §7 mock).
         Text {
           width: parent.width
-          text: root.filterText || ("Search " + root.sessions.length + " conversations…")
+          text: root.filterText ? "RESULTS" : "RECENT"
           color: root.foreground
-          opacity: root.filterText ? 1 : 0.58
+          opacity: 0.4
           font.family: root.fontFamily
-          font.pixelSize: Style.font.heading
-          elide: Text.ElideRight
+          font.pixelSize: Style.font.bodySmall
+          font.letterSpacing: 2
         }
 
         Item {
@@ -307,6 +355,7 @@ Item {
             width: root.widePreview ? parent.width - root.previewWidth - Style.spacing.lg : parent.width
             model: root.results
             clip: true
+            spacing: Style.space(4)
             boundsBehavior: Flickable.StopAtBounds
 
           delegate: Rectangle {
@@ -322,7 +371,7 @@ Item {
             readonly property bool inlinePreview: current && !root.widePreview
 
             width: resultList.width
-            height: contentCol.height + Style.space(14)
+            height: contentCol.height + Style.space(22)
             radius: root.cornerRadius
             color: current ? root.selectedBackground : "transparent"
 
@@ -342,10 +391,10 @@ Item {
               id: contentCol
               anchors.left: parent.left
               anchors.right: returnHint.left
-              anchors.leftMargin: Style.space(14)
+              anchors.leftMargin: Style.space(18)
               anchors.rightMargin: Style.spacing.md
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
+              spacing: Style.space(3)
 
               Text {
                 width: parent.width
@@ -353,7 +402,7 @@ Item {
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 1 : 0.4
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.title
+                font.pixelSize: Style.font.heading
                 elide: Text.ElideRight
               }
 
@@ -363,7 +412,7 @@ Item {
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 0.58 : 0.3
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.body
                 elide: Text.ElideRight
               }
 
@@ -380,7 +429,7 @@ Item {
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 0.75 : 0.3
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.body
                 elide: Text.ElideRight
               }
 
@@ -391,7 +440,7 @@ Item {
                 color: root.selectedText
                 opacity: 0.75
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.body
                 font.italic: true
                 elide: Text.ElideRight
               }
@@ -403,7 +452,7 @@ Item {
                 color: root.selectedText
                 opacity: 0.75
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.body
                 font.italic: true
                 elide: Text.ElideRight
               }
@@ -418,7 +467,7 @@ Item {
               text: "↵"
               color: root.selectedText
               font.family: root.fontFamily
-              font.pixelSize: Style.font.title
+              font.pixelSize: Style.font.heading
             }
 
             MouseArea {
@@ -459,7 +508,8 @@ Item {
               color: root.foreground
               opacity: 0.4
               font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              font.pixelSize: Style.font.bodySmall
+              font.letterSpacing: 2
             }
 
             Text {
@@ -469,7 +519,7 @@ Item {
               color: root.foreground
               opacity: 0.75
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.body
               wrapMode: Text.Wrap
               maximumLineCount: 9
               elide: Text.ElideRight
@@ -482,7 +532,8 @@ Item {
               color: root.foreground
               opacity: 0.4
               font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              font.pixelSize: Style.font.bodySmall
+              font.letterSpacing: 2
             }
 
             Text {
@@ -492,7 +543,7 @@ Item {
               color: root.foreground
               opacity: 0.75
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.body
               wrapMode: Text.Wrap
               maximumLineCount: 7
               elide: Text.ElideRight
@@ -505,20 +556,34 @@ Item {
               color: root.foreground
               opacity: 0.4
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.body
             }
           }
         }
 
-        Text {
+        // Footer separated by a hairline (design-inspo/hark), shortcuts
+        // spelled out — no cryptic caret notation.
+        Column {
           id: footer
           width: parent.width
-          text: "↵ resume · ^↵ copy cmd · ^o editor · ^t transcript · esc close"
-          color: root.foreground
-          opacity: 0.45
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          elide: Text.ElideRight
+          spacing: Style.spacing.md
+
+          Rectangle {
+            width: parent.width
+            height: 1
+            color: root.foreground
+            opacity: 0.12
+          }
+
+          Text {
+            width: parent.width
+            text: "↵ resume    ctrl+↵ copy command    ctrl+o open in editor    ctrl+t transcript"
+            color: root.foreground
+            opacity: 0.45
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            elide: Text.ElideRight
+          }
         }
       }
     }
