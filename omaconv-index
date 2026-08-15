@@ -100,10 +100,11 @@ def _ingest(obj, state):
         if title:
             state["aiTitle"] = title.strip()
     elif kind == "custom-title":
-        # Field never observed on this machine: two candidate names.
-        title = _str_field(obj, "customTitle", "title")
-        if title:
-            state["customTitle"] = title.strip()
+        title = obj.get("customTitle")
+        if isinstance(title, str):
+            # Empty string = explicit reset to the auto title (written by
+            # omaconv-set-title when the user clears the name).
+            state["customTitle"] = title.strip() or None
     elif kind == "user":
         _ingest_user(obj, state)
     ts = _str_field(obj, "timestamp")
@@ -266,25 +267,29 @@ def parse_frontmatter(path):
     except OSError:
         return fields
     with fh:
-        first = fh.readline()
-        if first.strip() != "---":
+        if fh.readline().strip() != "---":
             return fields
         for line in fh:
             if line.strip() == "---":
                 break
-            if line[:1] not in (" ", "\t"):
-                key, sep, value = line.partition(":")
-                if not sep or not key.strip() or " " in key.strip():
-                    current = None
-                    continue
-                current = key.strip()
-                value = value.strip().strip("\"'")
-                fields[current] = "" if value in (">", "|", ">-", "|-") else value
-            elif current:
-                cont = line.strip()
-                if cont:
-                    fields[current] = (fields[current] + " " + cont).strip()
+            current = _ingest_frontmatter_line(line, fields, current)
     return fields
+
+
+def _ingest_frontmatter_line(line, fields, current):
+    """One line of frontmatter: returns the key continuation lines attach to."""
+    if line[:1] in (" ", "\t"):
+        cont = line.strip()
+        if current and cont:
+            fields[current] = (fields[current] + " " + cont).strip()
+        return current
+    key, sep, value = line.partition(":")
+    key = key.strip()
+    if not sep or not key or " " in key:
+        return None
+    value = value.strip().strip("\"'")
+    fields[key] = "" if value in (">", "|", ">-", "|-") else value
+    return key
 
 
 def scan_skills(skills_dir):

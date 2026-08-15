@@ -105,6 +105,20 @@ function recentRows(prepared, pinnedIds, limit) {
   return rows
 }
 
+// AND across terms: every term must match; the first prompt hit feeds the
+// excerpt. Null when any term misses.
+function scoreEntry(entry, terms) {
+  var total = 0
+  var promptHit = null
+  for (var t = 0; t < terms.length; t++) {
+    var m = matchTerm(entry, terms[t])
+    if (!m) return null
+    total += m.score
+    if (!promptHit && m.prompt) promptHit = m.prompt
+  }
+  return { score: total, prompt: promptHit }
+}
+
 // query "" → the `limit` most recent sessions (PRD F2).
 // Otherwise: every term must match somewhere; score is the sum of the
 // best field score per term; ties break on recency.
@@ -120,20 +134,12 @@ function search(prepared, query, limit) {
   var scored = []
   for (i = 0; i < prepared.length; i++) {
     var entry = prepared[i]
-    var total = 0
-    var promptHit = null
-    var dead = false
-    for (var t = 0; t < terms.length; t++) {
-      var m = matchTerm(entry, terms[t])
-      if (!m) { dead = true; break }
-      total += m.score
-      if (!promptHit && m.prompt) promptHit = m.prompt
-    }
-    if (dead) continue
-    var excerpt = promptHit
-      ? buildExcerpt(entry.session.prompts[promptHit.index], promptHit.start, promptHit.length)
+    var hit = scoreEntry(entry, terms)
+    if (!hit) continue
+    var excerpt = hit.prompt
+      ? buildExcerpt(entry.session.prompts[hit.prompt.index], hit.prompt.start, hit.prompt.length)
       : null
-    scored.push({ session: entry.session, score: total, excerpt: excerpt })
+    scored.push({ session: entry.session, score: hit.score, excerpt: excerpt })
   }
   scored.sort(function(a, b) {
     if (b.score !== a.score) return b.score - a.score

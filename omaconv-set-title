@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""omaconv-set-title — rename a conversation by appending the same two
+lines Claude Code's /rename writes: custom-title (read by the resume
+picker and our indexer) and agent-name (read by the TUI title chip).
+
+Append-only: no existing line is ever touched. An empty title appends
+empty values, which readers treat as "back to the auto title".
+"""
+
+import json
+import os
+import sys
+
+
+def main(argv):
+    if len(argv) != 3:
+        print("usage: omaconv-set-title <transcript.jsonl> <title>", file=sys.stderr)
+        return 2
+    path, title = argv[1], argv[2].strip()
+    if not path.endswith(".jsonl") or not os.path.isfile(path):
+        print("omaconv-set-title: not a transcript: " + path, file=sys.stderr)
+        return 1
+    session_id = os.path.basename(path)[: -len(".jsonl")]
+    payload = "".join(
+        json.dumps(obj, ensure_ascii=False) + "\n"
+        for obj in (
+            {"type": "custom-title", "customTitle": title, "sessionId": session_id},
+            {"type": "agent-name", "agentName": title, "sessionId": session_id},
+        )
+    )
+    # O_APPEND: atomic for a short write, safe next to a live session writer.
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    try:
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

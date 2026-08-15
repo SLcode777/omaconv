@@ -37,14 +37,23 @@ Item {
   }
   readonly property string indexerPath: pluginFile("omaconv-index")
   readonly property string grepperPath: pluginFile("omaconv-grep")
+  readonly property string titlerPath: pluginFile("omaconv-set-title")
 
   // Two-step delete: first Ctrl+D arms this with the session id, the
   // second one trashes; any other key disarms.
   property string confirmDeleteId: ""
 
-  // UI preferences (pins, later renames): ours, stored in stateDir —
-  // Claude's transcript files are never written to.
+  // UI preferences (pins, renames): ours, stored in stateDir — Claude's
+  // transcript files are never written to.
   property var prefs: ({})
+
+  // Rename mode (Ctrl+R): a small modal over the palette. The rename is
+  // written into the transcript itself (custom-title + agent-name lines,
+  // append-only) so Claude Code's own picker and title chip follow.
+  property bool renameActive: false
+  property string renameText: ""
+  property string renameTargetPath: ""
+  property string renameCurrentTitle: ""
 
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
   // the menu style this palette too.
@@ -116,11 +125,10 @@ Item {
     try { parsed = JSON.parse(raw) } catch (e) {
       console.warn("omaconv: unreadable index:", e)
     }
-    var list = parsed && Array.isArray(parsed.sessions) ? parsed.sessions : []
-    root.sessions = list
-    root.prepared = Search.prepare(list)
+    root.sessions = parsed && Array.isArray(parsed.sessions) ? parsed.sessions : []
     root.preparedSkills = Search.prepareSkills(
       parsed && Array.isArray(parsed.skills) ? parsed.skills : [])
+    root.prepared = Search.prepare(root.sessions)
     root.rebuild()
   }
 
@@ -178,6 +186,23 @@ Item {
         break
       }
     }
+  }
+
+  function startRename(index) {
+    var s = root.sessionAt(index)
+    if (!s || !s.transcriptPath) return
+    root.renameTargetPath = s.transcriptPath
+    root.renameCurrentTitle = s.title || ""
+    root.renameText = ""
+    root.renameActive = true
+  }
+
+  // Empty input = cancel, never a silent reset.
+  function commitRename() {
+    root.renameActive = false
+    if (!root.renameTargetPath || !root.renameText.trim()) return
+    titler.command = ["python3", root.titlerPath, root.renameTargetPath, root.renameText.trim()]
+    titler.running = true
   }
 
   function skillAt(index) {
@@ -334,6 +359,11 @@ Item {
     onExited: if (!reindex.running) reindex.running = true
   }
 
+  Process {
+    id: titler
+    onExited: if (!reindex.running) reindex.running = true
+  }
+
   FileView {
     id: prefsFile
     path: root.stateDir + "/prefs.json"
@@ -387,6 +417,21 @@ Item {
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
+          // Rename mode captures everything until save or cancel.
+          if (root.renameActive) {
+            if (event.key === Qt.Key_Escape) {
+              root.renameActive = false
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              root.commitRename()
+            } else if (Util.editsFilter(event, root.renameText)) {
+              root.renameText = Util.editedFilter(event, root.renameText)
+            } else if (event.text && event.text.length === 1
+                && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
+              root.renameText += event.text
+            }
+            event.accepted = true
+            return
+          }
           var isDeleteChord = event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier
           if (root.confirmDeleteId && !isDeleteChord) root.confirmDeleteId = ""
           if (isDeleteChord) {
@@ -426,6 +471,9 @@ Item {
             event.accepted = true
           } else if (event.key === Qt.Key_P && event.modifiers === Qt.ControlModifier) {
             root.togglePin(root.selectedIndex)
+            event.accepted = true
+          } else if (event.key === Qt.Key_R && event.modifiers === Qt.ControlModifier) {
+            root.startRename(root.selectedIndex)
             event.accepted = true
           } else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
             root.setFilter(root.filterText + event.text)
@@ -800,17 +848,95 @@ Item {
 
           Text {
             width: parent.width
-            text: root.confirmDeleteId
+            text: root.renameActive
+              ? "renaming…"
+              : root.confirmDeleteId
               ? "ctrl+d again to move this conversation to the trash — any other key cancels"
               : (root.skillMode
                 ? "↵ open SKILL.md    ctrl+↵ copy /name    esc back"
-                : "↵ resume    ctrl+↵ copy    ctrl+p pin/unpin    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete    / skills")
+                : "↵ resume    ctrl+↵ copy    ctrl+p pin/unpin    ctrl+r rename    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete    / skills")
             color: root.foreground
             opacity: root.confirmDeleteId ? 0.9 : 0.45
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
             elide: Text.ElideRight
           }
+        }
+      }
+    }
+
+    // Rename modal, on top of the card. Keys stay handled by keyCatcher.
+    BorderSurface {
+      visible: root.renameActive
+      width: Math.min(Style.space(720), panel.width - Style.gapsOut * 2)
+      height: renameCol.height + Style.space(64)
+      radius: root.cornerRadius
+      anchors.centerIn: parent
+      color: root.background
+      borderSpec: root.borderSpec
+      padding: Style.space(24)
+
+      Column {
+        id: renameCol
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Style.space(32)
+        anchors.rightMargin: Style.space(32)
+        spacing: Style.spacing.lg
+
+        Text {
+          width: parent.width
+          text: "RENAME CONVERSATION"
+          color: root.foreground
+          opacity: 0.4
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.letterSpacing: 2
+        }
+
+        Text {
+          width: parent.width
+          text: root.renameCurrentTitle
+          color: root.foreground
+          opacity: 0.58
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          elide: Text.ElideRight
+        }
+
+        Rectangle {
+          width: parent.width
+          height: renameInput.height + Style.space(24)
+          radius: Style.space(4)
+          color: "transparent"
+          border.color: root.foreground
+          border.width: 1
+          opacity: 0.9
+
+          Text {
+            id: renameInput
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: Style.space(14)
+            anchors.rightMargin: Style.space(14)
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.renameText ? root.renameText + "▏" : "New title…"
+            color: root.foreground
+            opacity: root.renameText ? 1 : 0.4
+            font.family: root.fontFamily
+            font.pixelSize: Style.fontPx(1.5)
+            elide: Text.ElideLeft
+          }
+        }
+
+        Text {
+          width: parent.width
+          text: "↵ save    esc cancel"
+          color: root.foreground
+          opacity: 0.45
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
         }
       }
     }
