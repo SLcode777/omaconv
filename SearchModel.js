@@ -1,13 +1,13 @@
 // Pure search helpers shared by Menu.qml and the Node test suite.
-// Fields searched: title, cwd, prompts (PRD §7). Match is literal,
-// accent- and case-insensitive; a light subsequence fallback on the
-// title catches typo-ish queries. Multi-term queries are AND.
+// Fields searched: title, cwd, prompts (PRD §7). Match is literal only,
+// accent- and case-insensitive; multi-term queries are AND. No
+// subsequence fuzzing: it surfaced rows no excerpt could explain
+// (scattered-letter matches), against the PRD §7 rule.
 
 var TitleWordStart = 120
 var TitleSubstring = 100
 var CwdSubstring = 60
 var PromptSubstring = 40
-var TitleSubsequence = 25
 var ExcerptBefore = 24
 var ExcerptAfter = 56
 
@@ -43,16 +43,6 @@ function prepare(sessions) {
   return out
 }
 
-function isSubsequence(needle, haystack) {
-  var h = 0
-  for (var n = 0; n < needle.length; n++) {
-    h = haystack.indexOf(needle[n], h)
-    if (h === -1) return false
-    h++
-  }
-  return true
-}
-
 function wordStartsWith(haystack, needle, at) {
   return at === 0 || haystack[at - 1] === " " || haystack[at - 1] === "-" || haystack[at - 1] === "/"
 }
@@ -70,8 +60,6 @@ function matchTerm(entry, term) {
     if (p !== -1)
       return { score: PromptSubstring, prompt: { index: i, start: p, length: term.length } }
   }
-  if (term.length >= 3 && isSubsequence(term, entry.normTitle))
-    return { score: TitleSubsequence, prompt: null }
   return null
 }
 

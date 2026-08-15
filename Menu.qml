@@ -27,11 +27,17 @@ Item {
     var base = (xdg && xdg.length > 0) ? xdg : Quickshell.env("HOME") + "/.local/state"
     return base + "/omaconv"
   }
-  // The indexer lives next to this file; resolve it relative to the plugin dir.
-  readonly property string indexerPath: {
-    var url = Qt.resolvedUrl("omaconv-index").toString()
+  // Helpers live next to this file; resolve them relative to the plugin dir.
+  function pluginFile(name) {
+    var url = Qt.resolvedUrl(name).toString()
     return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
   }
+  readonly property string indexerPath: pluginFile("omaconv-index")
+  readonly property string grepperPath: pluginFile("omaconv-grep")
+
+  // Two-step delete: first Ctrl+D arms this with the session id, the
+  // second one trashes; any other key disarms.
+  property string confirmDeleteId: ""
 
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
   // the menu style this palette too.
@@ -72,6 +78,7 @@ Item {
     root.opened = true
     root.filterText = ""
     root.selectedIndex = 0
+    root.confirmDeleteId = ""
     root.rebuild()
     // Freshness (PRD §6): show the cache instantly, reindex in the
     // background, let the FileView reload if anything changed.
@@ -138,19 +145,45 @@ Item {
     root.dismiss()
   }
 
-  function openInEditor(index) {
+  function openTerminal(index) {
     var s = root.sessionAt(index)
     if (!s || s.cwdExists !== true) return
     root.dismiss()
-    Quickshell.execDetached(["setsid", "uwsm-app", "--", "omarchy-launch-editor", s.cwd])
+    Quickshell.execDetached(["setsid", "uwsm-app", "--", "xdg-terminal-exec", "--dir=" + s.cwd])
   }
 
   function revealTranscript(index) {
     var s = root.sessionAt(index)
     if (!s || !s.transcriptPath) return
     root.dismiss()
-    var dir = s.transcriptPath.substring(0, s.transcriptPath.lastIndexOf("/"))
-    Quickshell.execDetached(["setsid", "uwsm-app", "--", "nautilus", "--new-window", dir])
+    Quickshell.execDetached(["setsid", "uwsm-app", "--", "nautilus", "--select", s.transcriptPath])
+  }
+
+  function grepTranscript(index) {
+    var s = root.sessionAt(index)
+    if (!s || !s.transcriptPath) return
+    var pattern = root.filterText
+    root.dismiss()
+    Quickshell.execDetached([
+      "setsid", "uwsm-app", "--", "xdg-terminal-exec",
+      root.grepperPath, pattern, s.transcriptPath
+    ])
+  }
+
+  function requestDelete(index) {
+    var s = root.sessionAt(index)
+    if (!s) return
+    if (root.confirmDeleteId !== s.id) {
+      root.confirmDeleteId = s.id
+      return
+    }
+    root.confirmDeleteId = ""
+    // To the trash, never rm — recoverable. The session subdir (subagents)
+    // may not exist; gio processes each argument independently.
+    trasher.command = ["gio", "trash",
+      s.transcriptPath,
+      s.transcriptPath.slice(0, -".jsonl".length)]
+    trasher.running = true
   }
 
   function resumeIndex(index) {
@@ -206,6 +239,11 @@ Item {
     onExited: indexFile.reload()
   }
 
+  Process {
+    id: trasher
+    onExited: if (!reindex.running) reindex.running = true
+  }
+
   FileView {
     id: indexFile
     path: root.stateDir + "/index.json"
@@ -253,7 +291,12 @@ Item {
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Escape) {
+          var isDeleteChord = event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier
+          if (root.confirmDeleteId && !isDeleteChord) root.confirmDeleteId = ""
+          if (isDeleteChord) {
+            root.requestDelete(root.selectedIndex)
+            event.accepted = true
+          } else if (event.key === Qt.Key_Escape) {
             if (root.filterText) root.setFilter("")
             else root.dismiss()
             event.accepted = true
@@ -271,10 +314,13 @@ Item {
             else root.resumeIndex(root.selectedIndex)
             event.accepted = true
           } else if (event.key === Qt.Key_O && event.modifiers === Qt.ControlModifier) {
-            root.openInEditor(root.selectedIndex)
+            root.openTerminal(root.selectedIndex)
             event.accepted = true
           } else if (event.key === Qt.Key_T && event.modifiers === Qt.ControlModifier) {
             root.revealTranscript(root.selectedIndex)
+            event.accepted = true
+          } else if (event.key === Qt.Key_G && event.modifiers === Qt.ControlModifier) {
+            root.grepTranscript(root.selectedIndex)
             event.accepted = true
           } else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
             root.setFilter(root.filterText + event.text)
@@ -577,9 +623,11 @@ Item {
 
           Text {
             width: parent.width
-            text: "↵ resume    ctrl+↵ copy command    ctrl+o open in editor    ctrl+t transcript"
+            text: root.confirmDeleteId
+              ? "ctrl+d again to move this conversation to the trash — any other key cancels"
+              : "↵ resume    ctrl+↵ copy command    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete"
             color: root.foreground
-            opacity: 0.45
+            opacity: root.confirmDeleteId ? 0.9 : 0.45
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
             elide: Text.ElideRight

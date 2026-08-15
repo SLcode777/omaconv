@@ -1,0 +1,29 @@
+#!/bin/sh
+# Search inside a transcript, rendered as readable dialogue first
+# (omaconv-render), then browsed with the ugrep interactive TUI when
+# available, plain less otherwise. $1 = initial pattern (may be empty),
+# $2 = transcript path. Args are positional, never interpolated.
+
+pattern="$1"
+file="$2"
+[ -f "$file" ] || exit 1
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+tmp=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omaconv-XXXXXX.txt") || exit 1
+trap 'rm -f "$tmp"' EXIT INT TERM
+
+# The rendered text holds conversation content: runtime dir is user-only,
+# and the file is removed when the pager exits.
+python3 "$here/omaconv-render" "$file" > "$tmp" || exit 1
+
+if command -v ugrep >/dev/null 2>&1; then
+  if [ -n "$pattern" ]; then
+    ugrep -Q -i -e "$pattern" -- "$tmp"
+  else
+    ugrep -Q -i -- "$tmp"
+  fi
+elif [ -n "$pattern" ]; then
+  less -i -p "$pattern" -- "$tmp"
+else
+  less -- "$tmp"
+fi

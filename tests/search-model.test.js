@@ -106,13 +106,11 @@ test("excerpt is truncated with ellipses on long prompts", () => {
   assert.ok(e.after.endsWith("…"))
 })
 
-test("title subsequence catches near-miss queries, scored low", () => {
+test("scattered-letter subsequences do not match (real false positive)", () => {
   const prepared = model.prepare([
-    session({ id: "fuzzy", title: "Migration Quattro" }),
-    session({ id: "exact", title: "qtro literal" })
+    session({ id: "kando", title: "Commandes de screenshot et OCR pour Kando" })
   ])
-  const out = model.search(prepared, "qtro", 10)
-  assert.equal(ids(out), "exact,fuzzy")
+  assert.equal(model.search(prepared, "omadoro", 10).length, 0)
 })
 
 test("equal scores tie-break on recency", () => {

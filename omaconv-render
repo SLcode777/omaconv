@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""omaconv-render — render a Claude Code transcript as a readable dialogue.
+
+Keeps only what a human wrote or read: user text and assistant text.
+Tool results, thinking blocks, tool calls and command wrappers are noise
+and are dropped. Tolerant parsing, stdlib only (PRD §9).
+"""
+
+import json
+import sys
+
+NOISE_PREFIXES = ("<command-", "<local-command", "Caveat:", "<system-reminder", "<task-notification")
+
+
+def message_texts(content):
+    if isinstance(content, str):
+        return [content]
+    out = []
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    out.append(text)
+    return out
+
+
+def render(path, out):
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError as e:
+        print("omaconv-render: " + str(e), file=sys.stderr)
+        return 1
+    with fh:
+        for line in fh:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict) or obj.get("isMeta"):
+                continue
+            kind = obj.get("type")
+            if kind not in ("user", "assistant"):
+                continue
+            message = obj.get("message")
+            if not isinstance(message, dict):
+                continue
+            parts = [p for p in message_texts(message.get("content"))
+                     if p.strip() and not p.lstrip().startswith(NOISE_PREFIXES)]
+            if not parts:
+                continue
+            stamp = obj.get("timestamp")
+            stamp = " " + stamp[:16].replace("T", " ") if isinstance(stamp, str) else ""
+            who = "YOU" if kind == "user" else "CLAUDE"
+            out.write("\n───── " + who + stamp + " ─────\n\n")
+            for part in parts:
+                out.write(part.rstrip() + "\n")
+    return 0
+
+
+def main(argv):
+    if len(argv) != 2:
+        print("usage: omaconv-render <transcript.jsonl>", file=sys.stderr)
+        return 2
+    return render(argv[1], sys.stdout)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
