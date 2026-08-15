@@ -55,6 +55,9 @@ Item {
   property string renameTargetPath: ""
   property string renameCurrentTitle: ""
 
+  // Ctrl+K: shortcuts help modal.
+  property bool helpActive: false
+
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
   // the menu style this palette too.
   property color background: Color.menu.background
@@ -338,6 +341,30 @@ Item {
     return months + (months === 1 ? " month ago" : " months ago")
   }
 
+  // Footer hints, clipse-style: accent-colored key, dim description,
+  // "·" separators. Two explicit colors instead of Text.opacity, which
+  // would dim the accent too.
+  function dimColor() {
+    var f = root.foreground
+    var b = root.background
+    return Qt.rgba(f.r * 0.55 + b.r * 0.45, f.g * 0.55 + b.g * 0.45, f.b * 0.55 + b.b * 0.45, 1)
+  }
+
+  function footerHints(pairs) {
+    var accent = "" + root.selectedText
+    var dim = "" + dimColor()
+    var parts = []
+    for (var i = 0; i < pairs.length; i++) {
+      parts.push("<font color=\"" + accent + "\">" + pairs[i][0] + "</font>"
+        + "<font color=\"" + dim + "\"> " + pairs[i][1] + "</font>")
+    }
+    return parts.join("<font color=\"" + dim + "\">  ·  </font>")
+  }
+
+  function dimText(text) {
+    return "<font color=\"" + ("" + dimColor()) + "\">" + text + "</font>"
+  }
+
   function subtitleFor(s) {
     // ↪ marks a fallback: the home dir is gone, resume lands elsewhere —
     // shown, never silent (PRD §5).
@@ -429,6 +456,18 @@ Item {
                 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
               root.renameText += event.text
             }
+            event.accepted = true
+            return
+          }
+          if (root.helpActive) {
+            if (event.key === Qt.Key_Escape
+                || (event.key === Qt.Key_K && event.modifiers === Qt.ControlModifier))
+              root.helpActive = false
+            event.accepted = true
+            return
+          }
+          if (event.key === Qt.Key_K && event.modifiers === Qt.ControlModifier) {
+            root.helpActive = true
             event.accepted = true
             return
           }
@@ -848,19 +887,101 @@ Item {
 
           Text {
             width: parent.width
+            textFormat: Text.StyledText
             text: root.renameActive
-              ? "renaming…"
+              ? root.dimText("renaming…")
               : root.confirmDeleteId
-              ? "ctrl+d again to move this conversation to the trash — any other key cancels"
+              ? root.footerHints([["ctrl+d", "again to move this conversation to the trash — any other key cancels"]])
               : (root.skillMode
-                ? "↵ open SKILL.md    ctrl+↵ copy /name    esc back"
-                : "↵ resume    ctrl+↵ copy    ctrl+p pin/unpin    ctrl+r rename    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete    / skills")
+                ? root.footerHints([["↵", "open SKILL.md"], ["ctrl+↵", "copy /name"], ["esc", "back"]])
+                : root.footerHints([["↵", "resume"], ["ctrl+↵", "copy command"], ["ctrl+k", "all shortcuts"], ["/", "skills"]]))
             color: root.foreground
-            opacity: root.confirmDeleteId ? 0.9 : 0.45
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
             elide: Text.ElideRight
           }
+        }
+      }
+    }
+
+    // Shortcuts help modal (Ctrl+K).
+    BorderSurface {
+      visible: root.helpActive
+      width: Math.min(Style.space(640), panel.width - Style.gapsOut * 2)
+      height: helpCol.height + Style.space(64)
+      radius: root.cornerRadius
+      anchors.centerIn: parent
+      color: root.background
+      borderSpec: root.borderSpec
+      padding: Style.space(24)
+
+      Column {
+        id: helpCol
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Style.space(32)
+        anchors.rightMargin: Style.space(32)
+        spacing: Style.spacing.md
+
+        Text {
+          width: parent.width
+          text: "SHORTCUTS"
+          color: root.foreground
+          opacity: 0.4
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.letterSpacing: 2
+        }
+
+        Repeater {
+          model: [
+            { key: "↵",       what: "resume in its directory" },
+            { key: "ctrl+↵",  what: "copy the resume command" },
+            { key: "ctrl+p",  what: "pin / unpin" },
+            { key: "ctrl+r",  what: "rename" },
+            { key: "ctrl+o",  what: "open a terminal in its directory" },
+            { key: "ctrl+t",  what: "reveal the transcript in Files" },
+            { key: "ctrl+g",  what: "search inside the transcript" },
+            { key: "ctrl+d",  what: "delete to trash (press twice)" },
+            { key: "/",       what: "skills namespace" },
+            { key: "esc",     what: "clear search, then close" }
+          ]
+
+          Item {
+            required property var modelData
+            width: helpCol.width
+            height: Style.font.title + Style.space(10)
+
+            Text {
+              width: Style.space(110)
+              text: parent.modelData.key
+              color: root.selectedText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+            }
+
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(120)
+              anchors.right: parent.right
+              text: parent.modelData.what
+              color: root.foreground
+              opacity: 0.75
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              elide: Text.ElideRight
+            }
+          }
+        }
+
+        Text {
+          width: parent.width
+          textFormat: Text.StyledText
+          text: root.footerHints([["esc", "close"]])
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
         }
       }
     }
@@ -932,9 +1053,9 @@ Item {
 
         Text {
           width: parent.width
-          text: "↵ save    esc cancel"
+          textFormat: Text.StyledText
+          text: root.footerHints([["↵", "save"], ["esc", "cancel"]])
           color: root.foreground
-          opacity: 0.45
           font.family: root.fontFamily
           font.pixelSize: Style.font.title
         }
