@@ -20,7 +20,10 @@ Item {
   property string filterText: ""
   property var sessions: []
   property var prepared: []
+  property var preparedSkills: []
   property var results: []
+  // "/" as first character switches the palette to the skills namespace.
+  readonly property bool skillMode: filterText.indexOf("/") === 0
 
   readonly property string stateDir: {
     var xdg = Quickshell.env("XDG_STATE_HOME")
@@ -67,7 +70,10 @@ Item {
 
   readonly property var selectedSession: (root.results.length > 0
     && root.selectedIndex >= 0 && root.selectedIndex < root.results.length)
-    ? root.results[root.selectedIndex].session : null
+    ? (root.results[root.selectedIndex].session || null) : null
+  readonly property var selectedSkill: (root.results.length > 0
+    && root.selectedIndex >= 0 && root.selectedIndex < root.results.length)
+    ? (root.results[root.selectedIndex].skill || null) : null
   readonly property string previewFirst: (selectedSession && Array.isArray(selectedSession.prompts)
     && selectedSession.prompts.length > 0) ? selectedSession.prompts[0] : ""
   readonly property string previewLast: (selectedSession && Array.isArray(selectedSession.prompts)
@@ -109,15 +115,39 @@ Item {
     var list = parsed && Array.isArray(parsed.sessions) ? parsed.sessions : []
     root.sessions = list
     root.prepared = Search.prepare(list)
+    root.preparedSkills = Search.prepareSkills(
+      parsed && Array.isArray(parsed.skills) ? parsed.skills : [])
     root.rebuild()
   }
 
   // Empty query: the 10 most recent (PRD F2). Otherwise search all three
-  // fields, capped at 50 rows.
+  // fields, capped at 50 rows. Leading "/": skills namespace instead.
   function rebuild() {
-    var out = Search.search(root.prepared, root.filterText, root.filterText ? 50 : 10)
+    var out
+    if (root.skillMode)
+      out = Search.searchSkills(root.preparedSkills, root.filterText.substring(1), 50)
+    else
+      out = Search.search(root.prepared, root.filterText, root.filterText ? 50 : 10)
     root.results = out
     if (root.selectedIndex >= out.length) root.selectedIndex = Math.max(0, out.length - 1)
+  }
+
+  function skillAt(index) {
+    return (index >= 0 && index < root.results.length) ? (root.results[index].skill || null) : null
+  }
+
+  function openSkill(index) {
+    var s = root.skillAt(index)
+    if (!s || !s.path) return
+    root.dismiss()
+    Quickshell.execDetached(["setsid", "uwsm-app", "--", "omarchy-launch-editor", s.path])
+  }
+
+  function copySkillName(index) {
+    var s = root.skillAt(index)
+    if (!s) return
+    Quickshell.execDetached(["wl-copy", "/" + s.name])
+    root.dismiss()
   }
 
   function setFilter(next) {
@@ -140,16 +170,17 @@ Item {
   // PRD §9 prescribes for vanished directories. Only a missing cwd blocks it.
   function copyCommand(index) {
     var s = root.sessionAt(index)
-    if (!s || !s.cwd) return
-    Quickshell.execDetached(["wl-copy", Search.resumeCommand(s.cwd, s.id)])
+    var cwd = s ? (s.resumeCwd || s.cwd) : null
+    if (!cwd) return
+    Quickshell.execDetached(["wl-copy", Search.resumeCommand(cwd, s.id)])
     root.dismiss()
   }
 
   function openTerminal(index) {
     var s = root.sessionAt(index)
-    if (!s || s.cwdExists !== true) return
+    if (!s || !s.resumeCwd) return
     root.dismiss()
-    Quickshell.execDetached(["setsid", "uwsm-app", "--", "xdg-terminal-exec", "--dir=" + s.cwd])
+    Quickshell.execDetached(["setsid", "uwsm-app", "--", "xdg-terminal-exec", "--dir=" + s.resumeCwd])
   }
 
   function revealTranscript(index) {
@@ -189,14 +220,15 @@ Item {
   function resumeIndex(index) {
     var s = root.sessionAt(index)
     if (!s) return
-    // A session whose cwd is gone cannot be resumed in place (PRD §9).
-    if (!s.cwdExists || !s.cwd) return
+    // resumeCwd: the session's home dir, or the most recent surviving cwd
+    // when the home is gone (shown with ↪). Null → nothing left (PRD §9).
+    if (!s.resumeCwd) return
     root.dismiss()
     // Argument array, never an interpolated shell string: cwd and id come
     // from disk and are untrusted data (PRD §10).
     Quickshell.execDetached([
       "setsid", "uwsm-app", "--",
-      "xdg-terminal-exec", "--dir=" + s.cwd,
+      "xdg-terminal-exec", "--dir=" + s.resumeCwd,
       "claude", "--resume", s.id
     ])
   }
@@ -226,7 +258,9 @@ Item {
   }
 
   function subtitleFor(s) {
-    var parts = [homeAbbrev(s.cwd)]
+    // ↪ marks a fallback: the home dir is gone, resume lands elsewhere —
+    // shown, never silent (PRD §5).
+    var parts = [s.cwdFallback ? "↪ " + homeAbbrev(s.resumeCwd) : homeAbbrev(s.cwd)]
     if (s.gitBranch) parts.push(s.gitBranch)
     var when = relativeDate(s.lastActivity)
     if (when) parts.push(when)
@@ -310,8 +344,14 @@ Item {
             root.select(1)
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            if (event.modifiers & Qt.ControlModifier) root.copyCommand(root.selectedIndex)
-            else root.resumeIndex(root.selectedIndex)
+            if (root.skillMode) {
+              if (event.modifiers & Qt.ControlModifier) root.copySkillName(root.selectedIndex)
+              else root.openSkill(root.selectedIndex)
+            } else if (event.modifiers & Qt.ControlModifier) {
+              root.copyCommand(root.selectedIndex)
+            } else {
+              root.resumeIndex(root.selectedIndex)
+            }
             event.accepted = true
           } else if (event.key === Qt.Key_O && event.modifiers === Qt.ControlModifier) {
             root.openTerminal(root.selectedIndex)
@@ -347,7 +387,7 @@ Item {
             anchors.right: escBadge.left
             anchors.rightMargin: Style.spacing.md
             anchors.verticalCenter: parent.verticalCenter
-            text: root.filterText || ("Search " + root.sessions.length + " conversations…")
+            text: root.filterText || ("Search " + root.sessions.length + " conversations OR type \"/\" for skills…")
             color: root.foreground
             opacity: root.filterText ? 1 : 0.5
             font.family: root.fontFamily
@@ -381,7 +421,7 @@ Item {
         // Section label, small caps (design-inspo/raindrop, PRD §7 mock).
         Text {
           width: parent.width
-          text: root.filterText ? "RESULTS" : "RECENT"
+          text: root.skillMode ? "SKILLS" : (root.filterText ? "RESULTS" : "RECENT")
           color: root.foreground
           opacity: 0.4
           font.family: root.fontFamily
@@ -409,12 +449,13 @@ Item {
             required property int index
             required property var modelData
 
-            readonly property var session: modelData.session
+            readonly property bool isSkill: modelData.skill !== undefined
+            readonly property var session: modelData.session || null
             readonly property bool current: index === root.selectedIndex
-            readonly property bool resumable: session.cwdExists === true
-            readonly property bool hasExcerpt: modelData.excerpt !== null && modelData.excerpt !== undefined
+            readonly property bool resumable: isSkill || !!(session && session.resumeCwd)
+            readonly property bool hasExcerpt: !isSkill && modelData.excerpt !== null && modelData.excerpt !== undefined
             // Narrow-screen preview: two extra lines under the selected row.
-            readonly property bool inlinePreview: current && !root.widePreview
+            readonly property bool inlinePreview: !isSkill && current && !root.widePreview
 
             width: resultList.width
             height: contentCol.height + Style.space(22)
@@ -444,7 +485,7 @@ Item {
 
               Text {
                 width: parent.width
-                text: row.session.title || row.session.id
+                text: row.isSkill ? "/" + row.modelData.skill.name : (row.session.title || row.session.id)
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 1 : 0.4
                 font.family: root.fontFamily
@@ -454,7 +495,9 @@ Item {
 
               Text {
                 width: parent.width
-                text: root.subtitleFor(row.session)
+                text: row.isSkill
+                  ? root.homeAbbrev(row.modelData.skill.dir) + "  ·  " + (row.modelData.skill.description || "—")
+                  : root.subtitleFor(row.session)
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 0.58 : 0.3
                 font.family: root.fontFamily
@@ -521,7 +564,7 @@ Item {
               hoverEnabled: true
               cursorShape: row.resumable ? Qt.PointingHandCursor : Qt.ArrowCursor
               onContainsMouseChanged: if (containsMouse) root.selectedIndex = row.index
-              onClicked: root.resumeIndex(row.index)
+              onClicked: row.isSkill ? root.openSkill(row.index) : root.resumeIndex(row.index)
             }
           }
 
@@ -604,6 +647,54 @@ Item {
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
             }
+
+            Text {
+              width: parent.width
+              visible: root.selectedSkill !== null
+              text: "LOCATION"
+              color: root.foreground
+              opacity: 0.4
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.letterSpacing: 2
+            }
+
+            Text {
+              width: parent.width
+              visible: root.selectedSkill !== null
+              text: root.selectedSkill ? root.homeAbbrev(root.selectedSkill.dir) : ""
+              color: root.foreground
+              opacity: 0.75
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              wrapMode: Text.WrapAnywhere
+              maximumLineCount: 2
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              visible: root.selectedSkill !== null
+              text: "DESCRIPTION"
+              color: root.foreground
+              opacity: 0.4
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.letterSpacing: 2
+            }
+
+            Text {
+              width: parent.width
+              visible: root.selectedSkill !== null
+              text: root.selectedSkill ? (root.selectedSkill.description || "—") : ""
+              color: root.foreground
+              opacity: 0.75
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              wrapMode: Text.Wrap
+              maximumLineCount: 16
+              elide: Text.ElideRight
+            }
           }
         }
 
@@ -625,7 +716,9 @@ Item {
             width: parent.width
             text: root.confirmDeleteId
               ? "ctrl+d again to move this conversation to the trash — any other key cancels"
-              : "↵ resume    ctrl+↵ copy command    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete"
+              : (root.skillMode
+                ? "↵ open SKILL.md    ctrl+↵ copy /name    esc back"
+                : "↵ resume    ctrl+↵ copy command    ctrl+o terminal    ctrl+t reveal    ctrl+g grep    ctrl+d delete    / skills")
             color: root.foreground
             opacity: root.confirmDeleteId ? 0.9 : 0.45
             font.family: root.fontFamily

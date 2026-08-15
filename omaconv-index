@@ -27,6 +27,10 @@ def default_state_dir():
     )
 
 
+def default_skills_dir():
+    return os.path.expanduser("~/.claude/skills")
+
+
 def truncate_title(text):
     text = " ".join(text.split())
     if len(text) <= TITLE_MAX:
@@ -212,6 +216,21 @@ def _session_for(path, cached):
     return build_session(path, stat, parsed)
 
 
+def _resume_cwd(session):
+    """Where a resume should land. The first cwd (the session's home) when
+    it still exists; otherwise the most recent cwd that does — a deliberate
+    project move is indistinguishable from tool-driven cd noise in the
+    transcript, so the fallback only kicks in when the home is gone.
+    Returns (cwd_or_none, is_fallback)."""
+    cwds = session.get("cwds") or []
+    if cwds and os.path.isdir(cwds[0]):
+        return cwds[0], False
+    for cwd in reversed(cwds):
+        if os.path.isdir(cwd):
+            return cwd, True
+    return None, False
+
+
 def scan(projects_dir, previous=None):
     """Build the index, incrementally when `previous` (the prior index) is given."""
     cached = {}
@@ -226,10 +245,67 @@ def scan(projects_dir, previous=None):
         if session is None or session.get("sidechainOnly"):
             continue
         session["cwdExists"] = bool(session.get("cwd")) and os.path.isdir(session["cwd"])
+        session["resumeCwd"], session["cwdFallback"] = _resume_cwd(session)
         sessions.append(session)
 
     sessions.sort(key=lambda s: s.get("lastActivity") or "", reverse=True)
     return {"schemaVersion": SCHEMA_VERSION, "sessions": sessions}
+
+
+def parse_frontmatter(path):
+    """Minimal tolerant YAML-frontmatter reader: top-level `key: value`
+    pairs, folded/indented continuation lines appended. No YAML library
+    in the stdlib, and skill files only use this subset."""
+    fields = {}
+    current = None
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return fields
+    with fh:
+        first = fh.readline()
+        if first.strip() != "---":
+            return fields
+        for line in fh:
+            if line.strip() == "---":
+                break
+            if line[:1] not in (" ", "\t"):
+                key, sep, value = line.partition(":")
+                if not sep or not key.strip() or " " in key.strip():
+                    current = None
+                    continue
+                current = key.strip()
+                value = value.strip().strip("\"'")
+                fields[current] = "" if value in (">", "|", ">-", "|-") else value
+            elif current:
+                cont = line.strip()
+                if cont:
+                    fields[current] = (fields[current] + " " + cont).strip()
+    return fields
+
+
+def scan_skills(skills_dir):
+    """One entry per ~/.claude/skills/<dir>/SKILL.md. Tiny corpus: always
+    rescanned in full, no cache."""
+    skills = []
+    try:
+        entries = os.listdir(skills_dir)
+    except OSError:
+        return skills
+    for name in sorted(entries):
+        path = os.path.join(skills_dir, name, "SKILL.md")
+        if not os.path.isfile(path):
+            continue
+        fields = parse_frontmatter(path)
+        skills.append({
+            "name": fields.get("name") or name,
+            "description": fields.get("description") or "",
+            "path": path,
+            # Symlinks resolved: shows where the skill really lives
+            # (omarchy system skill vs personal vs project).
+            "dir": os.path.dirname(os.path.realpath(path)),
+        })
+    return skills
 
 
 def load_cache(state_dir):
@@ -264,6 +340,7 @@ def write_cache(state_dir, index):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--projects-dir", default=default_projects_dir())
+    parser.add_argument("--skills-dir", default=default_skills_dir())
     parser.add_argument("--state-dir", default=default_state_dir())
     parser.add_argument("--full", action="store_true", help="ignore the cache, re-read everything")
     parser.add_argument("--quiet", action="store_true", help="write nothing to stdout")
@@ -271,6 +348,7 @@ def main(argv=None):
 
     previous = None if args.full else load_cache(args.state_dir)
     index = scan(args.projects_dir, previous)
+    index["skills"] = scan_skills(args.skills_dir)
     write_cache(args.state_dir, index)
     if not args.quiet:
         json.dump(index, sys.stdout, ensure_ascii=False)

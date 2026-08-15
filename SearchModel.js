@@ -123,6 +123,41 @@ function search(prepared, query, limit) {
   return scored.slice(0, limit)
 }
 
+// Skills namespace: same literal matching over name + description.
+function prepareSkills(skills) {
+  var out = []
+  for (var i = 0; i < (skills || []).length; i++) {
+    var s = skills[i]
+    if (!s || typeof s !== "object" || !s.name) continue
+    out.push({ skill: s, normName: normalize(s.name), normDesc: normalize(s.description) })
+  }
+  return out
+}
+
+function searchSkills(prepared, query, limit) {
+  var terms = tokenize(query)
+  var scored = []
+  for (var i = 0; i < prepared.length; i++) {
+    var entry = prepared[i]
+    var total = 0
+    var dead = false
+    for (var t = 0; t < terms.length; t++) {
+      var term = terms[t]
+      var at = entry.normName.indexOf(term)
+      if (at !== -1) total += wordStartsWith(entry.normName, term, at) ? TitleWordStart : TitleSubstring
+      else if (entry.normDesc.indexOf(term) !== -1) total += PromptSubstring
+      else { dead = true; break }
+    }
+    if (dead) continue
+    scored.push({ skill: entry.skill, score: total })
+  }
+  scored.sort(function(a, b) {
+    if (b.score !== a.score) return b.score - a.score
+    return a.skill.name < b.skill.name ? -1 : (a.skill.name > b.skill.name ? 1 : 0)
+  })
+  return scored.slice(0, limit)
+}
+
 // cwd and session id come from disk: quote them as data, single-quote
 // POSIX style, so a hostile path cannot inject into the copied command
 // (PRD §10).

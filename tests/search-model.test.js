@@ -147,6 +147,18 @@ test("resume command quotes cwd and id as data", () => {
     "cd '/tmp/l'\\''atelier; rm -rf /' && claude --resume 'id'")
 })
 
+test("skill search: name outranks description, empty query lists all", () => {
+  const prepared = model.prepareSkills([
+    { name: "omarchy", description: "desktop config", path: "/a" },
+    { name: "sonar-check", description: "predict omarchy alerts", path: "/b" },
+    null, { name: "" }
+  ])
+  const all = model.searchSkills(prepared, "", 10)
+  assert.equal(all.length, 2)
+  const out = model.searchSkills(prepared, "omarchy", 10)
+  assert.equal(Array.prototype.map.call(out, r => r.skill.name).join(","), "omarchy,sonar-check")
+})
+
 test("prepare tolerates malformed sessions", () => {
   const prepared = model.prepare([null, "junk", session({ id: "ok", prompts: null, title: null, cwd: null })])
   assert.equal(prepared.length, 1)

@@ -147,6 +147,39 @@ class TestParsing(Base):
         self.assertEqual(s["lastActivity"], "2026-08-02T10:00:00Z")
 
 
+class TestResumeCwd(Base):
+    def test_living_first_cwd_wins_no_fallback(self):
+        self.write_session("-p", "s1", jsonl(
+            {"type": "user", "cwd": self.tmp.name, "isSidechain": False},
+            {"type": "user", "cwd": "/somewhere/else", "isSidechain": False},
+        ))
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["resumeCwd"], self.tmp.name)
+        self.assertFalse(s["cwdFallback"])
+
+    def test_dead_first_cwd_falls_back_to_most_recent_living(self):
+        living = os.path.join(self.tmp.name, "alive")
+        os.makedirs(living)
+        self.write_session("-p", "s1", jsonl(
+            {"type": "user", "cwd": "/dead/home", "isSidechain": False},
+            {"type": "user", "cwd": living, "isSidechain": False},
+            {"type": "user", "cwd": "/dead/detour", "isSidechain": False},
+        ))
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["resumeCwd"], living)
+        self.assertTrue(s["cwdFallback"])
+        self.assertFalse(s["cwdExists"])
+
+    def test_all_cwds_dead_yields_none(self):
+        self.write_session("-p", "s1", jsonl(
+            {"type": "user", "cwd": "/dead/one", "isSidechain": False},
+            {"type": "user", "cwd": "/dead/two", "isSidechain": False},
+        ))
+        s = self.scan()["sessions"][0]
+        self.assertIsNone(s["resumeCwd"])
+        self.assertFalse(s["cwdFallback"])
+
+
 class TestExclusions(Base):
     def test_sidechain_only_session_excluded(self):
         self.write_session("-p", "side", jsonl(
@@ -228,6 +261,37 @@ class TestIncremental(Base):
         with open(os.path.join(self.state, "index.json"), "w") as fh:
             fh.write("{not json")
         self.assertIsNone(idx.load_cache(self.state))
+
+
+class TestSkills(Base):
+    def write_skill(self, name, frontmatter):
+        d = os.path.join(self.tmp.name, "skills", name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write(frontmatter)
+        return os.path.join(self.tmp.name, "skills")
+
+    def test_quoted_and_folded_descriptions(self):
+        root = self.write_skill("herdr",
+            '---\nname: herdr\ndescription: "Control Herdr, a multiplexer."\n---\nbody\n')
+        self.write_skill("omarchy",
+            "---\nname: omarchy\ndescription: >\n  REQUIRED for desktop config.\n"
+            "  Use when editing hypr.\n---\nbody\n")
+        skills = {s["name"]: s for s in idx.scan_skills(root)}
+        self.assertEqual(skills["herdr"]["description"], "Control Herdr, a multiplexer.")
+        self.assertEqual(skills["omarchy"]["description"],
+                         "REQUIRED for desktop config. Use when editing hypr.")
+
+    def test_missing_name_falls_back_to_dirname(self):
+        root = self.write_skill("mystery", "---\ndescription: x\n---\n")
+        self.assertEqual(idx.scan_skills(root)[0]["name"], "mystery")
+
+    def test_no_frontmatter_and_missing_dir_tolerated(self):
+        root = self.write_skill("bare", "# just markdown\n")
+        skills = idx.scan_skills(root)
+        self.assertEqual(skills[0]["name"], "bare")
+        self.assertEqual(skills[0]["description"], "")
+        self.assertEqual(idx.scan_skills("/nonexistent"), [])
 
 
 class TestCacheFile(Base):
