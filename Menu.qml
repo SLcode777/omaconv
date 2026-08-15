@@ -1,0 +1,329 @@
+import Quickshell
+import Quickshell.Io
+import Quickshell.Wayland
+import QtQuick
+import qs.Commons
+import qs.Ui
+
+// Omaconv — Claude Code conversation resume palette (PRD M2).
+// The QML never reads the .jsonl transcripts: it displays the index that
+// omaconv-index writes to ~/.local/state/omaconv/index.json (PRD §6).
+Item {
+  id: root
+
+  property var shell: null
+  property var manifest: null
+
+  property bool opened: false
+  property int selectedIndex: 0
+  property var sessions: []
+
+  readonly property string stateDir: {
+    var xdg = Quickshell.env("XDG_STATE_HOME")
+    var base = (xdg && xdg.length > 0) ? xdg : Quickshell.env("HOME") + "/.local/state"
+    return base + "/omaconv"
+  }
+  // The indexer lives next to this file; resolve it relative to the plugin dir.
+  readonly property string indexerPath: {
+    var url = Qt.resolvedUrl("omaconv-index").toString()
+    return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
+  }
+
+  // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
+  // the menu style this palette too.
+  property color background: Color.menu.background
+  property color foreground: Color.menu.text
+  property color borderColor: Color.menu.border
+  property var borderSpec: Border.surfaceSpec("menu", "border", borderColor, Math.max(1, Style.space(2)))
+  property color scrim: Color.menu.scrim
+  property color selectedBackground: Color.menu.selectedBackground
+  property color selectedText: Color.menu.selectedText
+  readonly property int cornerRadius: Style.cornerRadius
+  property string fontFamily: Style.font.menuFamily
+  property int contentMargin: Style.spacing.panelPadding
+  property int rowHeight: Style.space(44)
+  property int cardWidth: Math.min(Style.space(560), panel.width - Style.gapsOut * 2)
+  property int cardHeight: Math.min(Style.space(520), panel.height - Style.gapsOut * 2)
+
+  function open(payloadJson) {
+    root.opened = true
+    root.selectedIndex = 0
+    // Freshness (PRD §6): show the cache instantly, reindex in the
+    // background, let the FileView reload if anything changed.
+    if (!reindex.running) reindex.running = true
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function close() {
+    root.opened = false
+  }
+
+  function dismiss() {
+    root.opened = false
+    if (root.shell && typeof root.shell.hide === "function")
+      root.shell.hide((root.manifest && root.manifest.id) || "slcode777.omaconv")
+  }
+
+  function toggle() {
+    if (root.opened) root.dismiss()
+    else root.open("{}")
+  }
+
+  function loadIndex(raw) {
+    var parsed = null
+    try { parsed = JSON.parse(raw) } catch (e) {
+      console.warn("omaconv: unreadable index:", e)
+    }
+    var list = parsed && Array.isArray(parsed.sessions) ? parsed.sessions : []
+    root.sessions = list
+    if (root.selectedIndex >= list.length) root.selectedIndex = Math.max(0, list.length - 1)
+  }
+
+  function select(delta) {
+    if (root.sessions.length === 0) return
+    root.selectedIndex = (root.selectedIndex + delta + root.sessions.length) % root.sessions.length
+    resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+  }
+
+  function resumeIndex(index) {
+    if (index < 0 || index >= root.sessions.length) return
+    var s = root.sessions[index]
+    // A session whose cwd is gone cannot be resumed in place (PRD §9).
+    if (!s.cwdExists || !s.cwd) return
+    root.dismiss()
+    // Argument array, never an interpolated shell string: cwd and id come
+    // from disk and are untrusted data (PRD §10).
+    Quickshell.execDetached([
+      "setsid", "uwsm-app", "--",
+      "xdg-terminal-exec", "--dir=" + s.cwd,
+      "claude", "--resume", s.id
+    ])
+  }
+
+  function homeAbbrev(path) {
+    if (!path) return "?"
+    var home = Quickshell.env("HOME")
+    if (home && path.indexOf(home) === 0)
+      return "~" + path.substring(home.length)
+    return path
+  }
+
+  function relativeDate(iso) {
+    if (!iso) return ""
+    var then = new Date(iso)
+    if (isNaN(then.getTime())) return ""
+    var mins = Math.floor((Date.now() - then.getTime()) / 60000)
+    if (mins < 1) return "now"
+    if (mins < 60) return mins + " min ago"
+    var hours = Math.floor(mins / 60)
+    if (hours < 24) return hours + " h ago"
+    var days = Math.floor(hours / 24)
+    if (days === 1) return "yesterday"
+    if (days < 30) return days + " days ago"
+    var months = Math.floor(days / 30)
+    return months + (months === 1 ? " month ago" : " months ago")
+  }
+
+  function subtitleFor(s) {
+    var parts = [homeAbbrev(s.cwd)]
+    if (s.gitBranch) parts.push(s.gitBranch)
+    var when = relativeDate(s.lastActivity)
+    if (when) parts.push(when)
+    return parts.join("  ·  ")
+  }
+
+  Process {
+    id: reindex
+    command: ["python3", root.indexerPath, "--quiet"]
+    onExited: indexFile.reload()
+  }
+
+  FileView {
+    id: indexFile
+    path: root.stateDir + "/index.json"
+    watchChanges: true
+    onLoaded: root.loadIndex(text())
+    onFileChanged: reload()
+  }
+
+  PanelWindow {
+    id: panel
+    visible: root.opened
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    WlrLayershell.namespace: "omaconv"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+
+    Rectangle {
+      anchors.fill: parent
+      color: root.scrim
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      onClicked: root.dismiss()
+    }
+
+    BorderSurface {
+      id: card
+      width: root.cardWidth
+      height: root.cardHeight
+      radius: root.cornerRadius
+      anchors.centerIn: parent
+      color: root.background
+      borderSpec: root.borderSpec
+      padding: root.contentMargin
+
+      MouseArea { anchors.fill: parent; onClicked: {} }
+
+      Item {
+        id: keyCatcher
+        anchors.fill: parent
+        focus: true
+
+        Keys.priority: Keys.BeforeItem
+        Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_Escape) {
+            root.dismiss()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Up) {
+            root.select(-1)
+            event.accepted = true
+          } else if (event.key === Qt.Key_Down) {
+            root.select(1)
+            event.accepted = true
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            root.resumeIndex(root.selectedIndex)
+            event.accepted = true
+          }
+        }
+      }
+
+      Column {
+        anchors.fill: parent
+        anchors.topMargin: card.contentTopInset
+        anchors.rightMargin: card.contentRightInset
+        anchors.bottomMargin: card.contentBottomInset
+        anchors.leftMargin: card.contentLeftInset
+        spacing: Style.spacing.md
+
+        Text {
+          width: parent.width
+          text: root.sessions.length + " conversations"
+          color: root.foreground
+          opacity: 0.58
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.heading
+          elide: Text.ElideRight
+        }
+
+        ListView {
+          id: resultList
+          width: parent.width
+          height: parent.height - y - footer.height - Style.spacing.md
+          model: root.sessions
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+
+          delegate: Rectangle {
+            id: row
+            required property int index
+            required property var modelData
+
+            readonly property bool current: index === root.selectedIndex
+            readonly property bool resumable: modelData.cwdExists === true
+
+            width: resultList.width
+            height: root.rowHeight
+            radius: root.cornerRadius
+            color: current ? root.selectedBackground : "transparent"
+
+            // Accent bar on the selected row (design-inspo).
+            Rectangle {
+              visible: row.current
+              width: Math.max(2, Style.space(3))
+              height: parent.height - Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(4)
+              radius: width / 2
+              color: root.selectedText
+            }
+
+            Column {
+              anchors.left: parent.left
+              anchors.right: returnHint.left
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.spacing.md
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+
+              Text {
+                width: parent.width
+                text: row.modelData.title || row.modelData.id
+                color: row.current ? root.selectedText : root.foreground
+                opacity: row.resumable ? 1 : 0.4
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                text: root.subtitleFor(row.modelData)
+                color: row.current ? root.selectedText : root.foreground
+                opacity: row.resumable ? 0.58 : 0.3
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
+            }
+
+            Text {
+              id: returnHint
+              visible: row.current && row.resumable
+              anchors.right: parent.right
+              anchors.rightMargin: Style.spacing.md
+              anchors.verticalCenter: parent.verticalCenter
+              text: "↵"
+              color: root.selectedText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: row.resumable ? Qt.PointingHandCursor : Qt.ArrowCursor
+              onContainsMouseChanged: if (containsMouse) root.selectedIndex = row.index
+              onClicked: root.resumeIndex(row.index)
+            }
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: root.sessions.length === 0
+            text: "No conversations indexed yet"
+            color: root.foreground
+            opacity: 0.58
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+          }
+        }
+
+        Text {
+          id: footer
+          width: parent.width
+          text: "↵ resume   ·   esc close"
+          color: root.foreground
+          opacity: 0.45
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+    }
+  }
+}

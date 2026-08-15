@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "slcode777.omaconv",
+  "name": "Omaconv",
+  "version": "0.1.0",
+  "author": "SLcode777",
+  "license": "MIT",
+  "description": "Resume any Claude Code conversation from a searchable palette, in its original working directory.",
+  "kinds": ["menu"],
+  "entryPoints": { "menu": "Menu.qml" }
+}
