@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // Unit tests for SearchModel.js (PRD M3), run with: node tests/search-model.test.js
 
+// Pin the timezone so date-section tests behave the same on any machine,
+// and so the DST test actually crosses a transition.
+process.env.TZ = "Europe/Paris"
+
 const assert = require("node:assert/strict")
 const fs = require("node:fs")
 const path = require("node:path")
@@ -173,6 +177,14 @@ test("sectionFor buckets by local calendar day", () => {
   assert.equal(model.sectionFor(atLocal(2026, 7, 1, 12), NOW), "OLDER")
   assert.equal(model.sectionFor(null, NOW), "OLDER")
   assert.equal(model.sectionFor("garbage", NOW), "OLDER")
+})
+
+test("sectionFor survives the fall-back DST transition", () => {
+  // Paris, Mon 2026-10-26: the clocks went back on Sunday (25h day).
+  // A Sunday 00:30 session must land in YESTERDAY, not THIS WEEK.
+  const monday = new Date(2026, 9, 26, 15, 0, 0).getTime()
+  assert.equal(model.sectionFor(atLocal(2026, 9, 25, 0.5), monday), "YESTERDAY")
+  assert.equal(model.sectionFor(atLocal(2026, 9, 26, 9), monday), "TODAY")
 })
 
 test("recentRows: pinned first, then date sections, limit caps recents", () => {

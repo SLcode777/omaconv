@@ -84,18 +84,17 @@ function buildExcerpt(prompt, start, length) {
   }
 }
 
-var DAY_MS = 86400000
-
 // Relative date section for a session, local calendar days (timestamps
-// are UTC in the transcripts). THIS WEEK = the last 7 days.
+// are UTC in the transcripts). THIS WEEK = the last 7 days. Boundaries
+// use the Date constructor, not N*24h arithmetic, so DST transitions
+// (23h/25h days) can't shift them.
 function sectionFor(iso, nowMs) {
   var t = iso ? new Date(iso).getTime() : NaN
   if (isNaN(t)) return "OLDER"
   var now = new Date(nowMs)
-  var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  if (t >= startToday) return "TODAY"
-  if (t >= startToday - DAY_MS) return "YESTERDAY"
-  if (t >= startToday - 6 * DAY_MS) return "THIS WEEK"
+  if (t >= new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) return "TODAY"
+  if (t >= new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime()) return "YESTERDAY"
+  if (t >= new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6).getTime()) return "THIS WEEK"
   return "OLDER"
 }
 

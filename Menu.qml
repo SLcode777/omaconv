@@ -43,20 +43,28 @@ Item {
   // Ctrl+D again) confirms, esc cancels.
   property var confirmDeleteSession: null
 
-  // UI preferences (pins, renames): ours, stored in stateDir — Claude's
-  // transcript files are never written to.
+  // UI preferences (pins): ours, stored in stateDir. Renames are NOT
+  // here — they append to the transcript itself (see commitRename),
+  // one of the two documented writes into ~/.claude (PRD §10).
   property var prefs: ({})
 
-  // Rename mode (Ctrl+R): a small modal over the palette. The rename is
-  // written into the transcript itself (custom-title + agent-name lines,
-  // append-only) so Claude Code's own picker and title chip follow.
-  property bool renameActive: false
+  // Rename mode (Ctrl+R): a small modal over the palette. Same idiom as
+  // confirmDeleteSession — one nullable session object carries both the
+  // open state and the target; only the typed text lives apart. The
+  // rename is written into the transcript itself (custom-title +
+  // agent-name lines, append-only) so Claude Code's own picker and
+  // title chip follow.
+  property var renameSession: null
   property string renameText: ""
-  property string renameTargetPath: ""
-  property string renameCurrentTitle: ""
 
   // Ctrl+K: shortcuts help modal.
   property bool helpActive: false
+
+  function cancelModals() {
+    root.renameSession = null
+    root.helpActive = false
+    root.confirmDeleteSession = null
+  }
 
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
   // the menu style this palette too.
@@ -101,6 +109,7 @@ Item {
     root.filterText = ""
     root.selectedIndex = 0
     root.confirmDeleteSession = null
+    root.opError = ""
     root.rebuild()
     // Freshness (PRD §6): show the cache instantly, reindex in the
     // background, let the FileView reload if anything changed.
@@ -113,6 +122,9 @@ Item {
   }
 
   function dismiss() {
+    // The shell destroys this instance on hide (no keepLoaded), but reset
+    // the modals anyway so a future keepLoaded can't resurrect stale state.
+    root.cancelModals()
     root.opened = false
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "slcode777.omaconv")
@@ -194,18 +206,24 @@ Item {
   function startRename(index) {
     var s = root.sessionAt(index)
     if (!s || !s.transcriptPath) return
-    root.renameTargetPath = s.transcriptPath
-    root.renameCurrentTitle = s.title || ""
     root.renameText = ""
-    root.renameActive = true
+    root.renameSession = s
   }
 
   // Empty input = cancel, never a silent reset.
   function commitRename() {
-    root.renameActive = false
-    if (!root.renameTargetPath || !root.renameText.trim()) return
-    titler.command = ["python3", root.titlerPath, root.renameTargetPath, root.renameText.trim()]
-    titler.running = true
+    var s = root.renameSession
+    root.renameSession = null
+    if (!s || !root.renameText.trim()) return
+    root.enqueueOp(["python3", root.titlerPath, s.transcriptPath, root.renameText.trim()], "rename")
+  }
+
+  // Explicit reset: an empty title makes the auto title win again.
+  function commitResetTitle() {
+    var s = root.renameSession
+    root.renameSession = null
+    if (!s) return
+    root.enqueueOp(["python3", root.titlerPath, s.transcriptPath, ""], "title reset")
   }
 
   function skillAt(index) {
@@ -296,10 +314,9 @@ Item {
     if (!s || !s.transcriptPath) return
     // To the trash, never rm — recoverable. The session subdir (subagents)
     // may not exist; gio processes each argument independently.
-    trasher.command = ["gio", "trash",
+    root.enqueueOp(["gio", "trash",
       s.transcriptPath,
-      s.transcriptPath.slice(0, -".jsonl".length)]
-    trasher.running = true
+      s.transcriptPath.slice(0, -".jsonl".length)], "delete")
   }
 
   function resumeIndex(index, fork) {
@@ -330,19 +347,25 @@ Item {
     return path
   }
 
+  // Calendar days, same arithmetic as SearchModel.sectionFor — so
+  // "yesterday" here always sits under the YESTERDAY section.
   function relativeDate(iso) {
     if (!iso) return ""
     var then = new Date(iso)
     if (isNaN(then.getTime())) return ""
-    var mins = Math.floor((Date.now() - then.getTime()) / 60000)
-    if (mins < 1) return "now"
-    if (mins < 60) return mins + " min ago"
-    var hours = Math.floor(mins / 60)
-    if (hours < 24) return hours + " h ago"
-    var days = Math.floor(hours / 24)
-    if (days === 1) return "yesterday"
-    if (days < 30) return days + " days ago"
-    var months = Math.floor(days / 30)
+    var now = new Date()
+    var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    var startThen = new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime()
+    var dayDiff = Math.round((startToday - startThen) / 86400000)
+    if (dayDiff <= 0) {
+      var mins = Math.floor((now.getTime() - then.getTime()) / 60000)
+      if (mins < 1) return "now"
+      if (mins < 60) return mins + " min ago"
+      return Math.floor(mins / 60) + " h ago"
+    }
+    if (dayDiff === 1) return "yesterday"
+    if (dayDiff < 30) return dayDiff + " days ago"
+    var months = Math.floor(dayDiff / 30)
     return months + (months === 1 ? " month ago" : " months ago")
   }
 
@@ -386,14 +409,42 @@ Item {
     onExited: indexFile.reload()
   }
 
-  Process {
-    id: trasher
-    onExited: if (!reindex.running) reindex.running = true
+  // Mutations (trash, rename) run sequentially through a small queue:
+  // setting running=true on a live Process is a no-op, so back-to-back
+  // operations would otherwise drop the second one on a slow filesystem.
+  property var opQueue: []
+  property string opCurrentLabel: ""
+  // Last failed operation, shown in the footer until the next open/op.
+  property string opError: ""
+
+  function enqueueOp(cmd, label) {
+    var next = root.opQueue.slice()
+    next.push({ cmd: cmd, label: label })
+    root.opQueue = next
+    root.opError = ""
+    root.pumpOps()
+  }
+
+  function pumpOps() {
+    if (opRunner.running || root.opQueue.length === 0) return
+    var next = root.opQueue.slice()
+    var op = next.shift()
+    root.opQueue = next
+    root.opCurrentLabel = op.label
+    opRunner.command = op.cmd
+    opRunner.running = true
   }
 
   Process {
-    id: titler
-    onExited: if (!reindex.running) reindex.running = true
+    id: opRunner
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) {
+        root.opError = root.opCurrentLabel + " failed (exit " + exitCode + ")"
+        console.warn("omaconv:", root.opError, "—", JSON.stringify(command))
+      }
+      if (!reindex.running) reindex.running = true
+      root.pumpOps()
+    }
   }
 
   FileView {
@@ -450,9 +501,11 @@ Item {
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
           // Rename mode captures everything until save or cancel.
-          if (root.renameActive) {
+          if (root.renameSession) {
             if (event.key === Qt.Key_Escape) {
-              root.renameActive = false
+              root.renameSession = null
+            } else if (event.key === Qt.Key_R && event.modifiers === Qt.ControlModifier) {
+              root.commitResetTitle()
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
               root.commitRename()
             } else if (Util.editsFilter(event, root.renameText)) {
@@ -471,16 +524,17 @@ Item {
             event.accepted = true
             return
           }
-          if (event.key === Qt.Key_K && event.modifiers === Qt.ControlModifier) {
-            root.helpActive = true
+          var isDeleteChord = event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier
+          // Delete guard BEFORE the Ctrl+K opener, so help can't stack on
+          // top of an armed confirmation.
+          if (root.confirmDeleteSession) {
+            // The dialog owns esc/enter/tab; Ctrl+D again also confirms.
+            if (!deleteDialog.handleKey(event) && isDeleteChord) root.confirmDelete()
             event.accepted = true
             return
           }
-          var isDeleteChord = event.key === Qt.Key_D && event.modifiers === Qt.ControlModifier
-          if (root.confirmDeleteSession) {
-            if (event.key === Qt.Key_Escape) root.confirmDeleteSession = null
-            else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || isDeleteChord)
-              root.confirmDelete()
+          if (event.key === Qt.Key_K && event.modifiers === Qt.ControlModifier) {
+            root.helpActive = true
             event.accepted = true
             return
           }
@@ -899,7 +953,9 @@ Item {
           Text {
             width: parent.width
             textFormat: Text.StyledText
-            text: root.renameActive
+            text: root.opError
+              ? "⚠ " + root.opError
+              : root.renameSession
               ? root.dimText("renaming…")
               : (root.skillMode
                 ? root.footerHints([["↵", "open SKILL.md"], ["ctrl+↵", "copy /name"], ["esc", "back"]])
@@ -913,105 +969,51 @@ Item {
       }
     }
 
-    // Delete confirmation modal (Ctrl+D).
-    BorderSurface {
-      visible: root.confirmDeleteSession !== null
-      width: Math.min(Style.space(720), panel.width - Style.gapsOut * 2)
-      height: deleteCol.height + Style.space(64)
-      radius: root.cornerRadius
-      anchors.centerIn: parent
-      color: root.background
-      borderSpec: root.borderSpec
-      padding: Style.space(24)
+    // Mouse shield for the custom modals (the ConfirmDialog below ships
+    // its own scrim): swallows hover and clicks that would otherwise
+    // reach the rows behind; clicking outside cancels.
+    MouseArea {
+      visible: root.renameSession !== null || root.helpActive
+      anchors.fill: parent
+      hoverEnabled: true
+      onClicked: root.cancelModals()
+    }
 
-      Column {
-        id: deleteCol
-        anchors.verticalCenter: parent.verticalCenter
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: Style.space(32)
-        anchors.rightMargin: Style.space(32)
-        spacing: Style.spacing.lg
-
-        Text {
-          width: parent.width
-          text: "DELETE CONVERSATION — ARE YOU SURE?"
-          color: root.foreground
-          opacity: 0.4
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.letterSpacing: 2
-        }
-
-        Text {
-          width: parent.width
-          text: root.confirmDeleteSession ? (root.confirmDeleteSession.title || root.confirmDeleteSession.id) : ""
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.fontPx(1.5)
-          elide: Text.ElideRight
-        }
-
-        Text {
-          width: parent.width
-          text: root.confirmDeleteSession ? root.subtitleFor(root.confirmDeleteSession) : ""
-          color: root.foreground
-          opacity: 0.58
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.title
-          elide: Text.ElideRight
-        }
-
-        Text {
-          width: parent.width
-          text: "The transcript moves to the trash — recoverable from Files."
-          color: root.foreground
-          opacity: 0.75
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.title
-          wrapMode: Text.Wrap
-        }
-
-        Text {
-          width: parent.width
-          textFormat: Text.StyledText
-          text: root.footerHints([["↵", "delete"], ["esc", "cancel"]])
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.title
-        }
-      }
+    // Delete confirmation (Ctrl+D): local copy of the shell's dialog with
+    // the palette's type scale — scrim, urgent-styled confirm button and
+    // handleKey come built in.
+    ConfirmBox {
+      id: deleteDialog
+      anchors.fill: parent
+      opened: root.confirmDeleteSession !== null
+      message: root.confirmDeleteSession
+        ? "Delete “" + (root.confirmDeleteSession.title || root.confirmDeleteSession.id)
+          + "”?\n\nThe transcript moves to the trash — recoverable from Files."
+        : ""
+      confirmText: "Delete"
+      background: root.background
+      foreground: root.foreground
+      scrim: root.scrim
+      selectedBackground: root.selectedBackground
+      selectedText: root.selectedText
+      fontFamily: root.fontFamily
+      cornerRadius: root.cornerRadius
+      onCanceled: root.confirmDeleteSession = null
+      onConfirmed: root.confirmDelete()
     }
 
     // Shortcuts help modal (Ctrl+K).
-    BorderSurface {
+    ModalSurface {
       visible: root.helpActive
-      width: Math.min(Style.space(640), panel.width - Style.gapsOut * 2)
-      height: helpCol.height + Style.space(64)
-      radius: root.cornerRadius
-      anchors.centerIn: parent
+      caption: "SHORTCUTS"
       color: root.background
       borderSpec: root.borderSpec
-      padding: Style.space(24)
+      foreground: root.foreground
+      fontFamily: root.fontFamily
 
       Column {
-        id: helpCol
-        anchors.verticalCenter: parent.verticalCenter
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: Style.space(32)
-        anchors.rightMargin: Style.space(32)
-        spacing: Style.spacing.md
-
-        Text {
-          width: parent.width
-          text: "SHORTCUTS"
-          color: root.foreground
-          opacity: 0.4
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.letterSpacing: 2
-        }
+        width: parent.width
+        spacing: Style.space(4)
 
         Repeater {
           model: [
@@ -1030,7 +1032,7 @@ Item {
 
           Item {
             required property var modelData
-            width: helpCol.width
+            width: parent.width
             height: Style.font.title + Style.space(10)
 
             Text {
@@ -1066,79 +1068,57 @@ Item {
       }
     }
 
-    // Rename modal, on top of the card. Keys stay handled by keyCatcher.
-    BorderSurface {
-      visible: root.renameActive
-      width: Math.min(Style.space(720), panel.width - Style.gapsOut * 2)
-      height: renameCol.height + Style.space(64)
-      radius: root.cornerRadius
-      anchors.centerIn: parent
+    // Rename modal (Ctrl+R). Keys stay handled by keyCatcher.
+    ModalSurface {
+      visible: root.renameSession !== null
+      caption: "RENAME CONVERSATION"
       color: root.background
       borderSpec: root.borderSpec
-      padding: Style.space(24)
+      foreground: root.foreground
+      fontFamily: root.fontFamily
 
-      Column {
-        id: renameCol
-        anchors.verticalCenter: parent.verticalCenter
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.leftMargin: Style.space(32)
-        anchors.rightMargin: Style.space(32)
-        spacing: Style.spacing.lg
+      Text {
+        width: parent.width
+        text: root.renameSession ? (root.renameSession.title || root.renameSession.id) : ""
+        color: root.foreground
+        opacity: 0.58
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.title
+        elide: Text.ElideRight
+      }
 
-        Text {
-          width: parent.width
-          text: "RENAME CONVERSATION"
-          color: root.foreground
-          opacity: 0.4
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          font.letterSpacing: 2
-        }
-
-        Text {
-          width: parent.width
-          text: root.renameCurrentTitle
-          color: root.foreground
-          opacity: 0.58
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.title
-          elide: Text.ElideRight
-        }
-
-        Rectangle {
-          width: parent.width
-          height: renameInput.height + Style.space(24)
-          radius: Style.space(4)
-          color: "transparent"
-          border.color: root.foreground
-          border.width: 1
-          opacity: 0.9
-
-          Text {
-            id: renameInput
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.leftMargin: Style.space(14)
-            anchors.rightMargin: Style.space(14)
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.renameText ? root.renameText + "▏" : "New title…"
-            color: root.foreground
-            opacity: root.renameText ? 1 : 0.4
-            font.family: root.fontFamily
-            font.pixelSize: Style.fontPx(1.5)
-            elide: Text.ElideLeft
-          }
-        }
+      Rectangle {
+        width: parent.width
+        height: renameInput.height + Style.space(24)
+        radius: Style.space(4)
+        color: "transparent"
+        border.color: root.foreground
+        border.width: 1
+        opacity: 0.9
 
         Text {
-          width: parent.width
-          textFormat: Text.StyledText
-          text: root.footerHints([["↵", "save"], ["esc", "cancel"]])
+          id: renameInput
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.leftMargin: Style.space(14)
+          anchors.rightMargin: Style.space(14)
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.renameText ? root.renameText + "▏" : "New title…"
           color: root.foreground
+          opacity: root.renameText ? 1 : 0.4
           font.family: root.fontFamily
-          font.pixelSize: Style.font.title
+          font.pixelSize: Style.fontPx(1.5)
+          elide: Text.ElideLeft
         }
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.StyledText
+        text: root.footerHints([["↵", "save"], ["ctrl+r", "reset auto title"], ["esc", "cancel"]])
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.title
       }
     }
   }
