@@ -31,6 +31,36 @@ def default_skills_dir():
     return os.path.expanduser("~/.claude/skills")
 
 
+def default_sessions_dir():
+    return os.path.expanduser("~/.claude/sessions")
+
+
+def scan_running(sessions_dir):
+    """sessionId → kind ("interactive", "bg", …) for sessions whose process
+    is still alive. State files may be stale after a crash: trust /proc,
+    not the file's presence."""
+    running = {}
+    try:
+        entries = os.listdir(sessions_dir)
+    except OSError:
+        return running
+    for name in entries:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(sessions_dir, name), encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(state, dict):
+            continue
+        sid = state.get("sessionId")
+        pid = state.get("pid")
+        if isinstance(sid, str) and isinstance(pid, int) and os.path.exists("/proc/%d" % pid):
+            running[sid] = state.get("kind") or "interactive"
+    return running
+
+
 def truncate_title(text):
     text = " ".join(text.split())
     if len(text) <= TITLE_MAX:
@@ -235,8 +265,9 @@ def _resume_cwd(session):
     return None, False
 
 
-def scan(projects_dir, previous=None):
+def scan(projects_dir, previous=None, sessions_dir=None):
     """Build the index, incrementally when `previous` (the prior index) is given."""
+    running = scan_running(sessions_dir or default_sessions_dir())
     cached = {}
     if previous:
         for session in previous.get("sessions", []):
@@ -250,6 +281,7 @@ def scan(projects_dir, previous=None):
             continue
         session["cwdExists"] = bool(session.get("cwd")) and os.path.isdir(session["cwd"])
         session["resumeCwd"], session["cwdFallback"] = _resume_cwd(session)
+        session["running"] = running.get(session["id"])
         sessions.append(session)
 
     sessions.sort(key=lambda s: s.get("lastActivity") or "", reverse=True)
@@ -349,13 +381,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--projects-dir", default=default_projects_dir())
     parser.add_argument("--skills-dir", default=default_skills_dir())
+    parser.add_argument("--sessions-dir", default=default_sessions_dir())
     parser.add_argument("--state-dir", default=default_state_dir())
     parser.add_argument("--full", action="store_true", help="ignore the cache, re-read everything")
     parser.add_argument("--quiet", action="store_true", help="write nothing to stdout")
     args = parser.parse_args(argv)
 
     previous = None if args.full else load_cache(args.state_dir)
-    index = scan(args.projects_dir, previous)
+    index = scan(args.projects_dir, previous, args.sessions_dir)
     index["skills"] = scan_skills(args.skills_dir)
     write_cache(args.state_dir, index)
     if not args.quiet:

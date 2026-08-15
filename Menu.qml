@@ -38,6 +38,7 @@ Item {
   readonly property string indexerPath: pluginFile("omaconv-index")
   readonly property string grepperPath: pluginFile("omaconv-grep")
   readonly property string titlerPath: pluginFile("omaconv-set-title")
+  readonly property string resumerPath: pluginFile("omaconv-resume")
 
   // Delete confirmation modal: Ctrl+D stores the target here, ↵ (or
   // Ctrl+D again) confirms, esc cancels.
@@ -326,16 +327,26 @@ Item {
     // when the home is gone (shown with ↪). Null → nothing left (PRD §9).
     if (!s.resumeCwd) return
     root.dismiss()
+    // A session already running as a background agent refuses --resume:
+    // open the attach picker instead (forking it is fine, though).
+    if (s.running === "bg" && !fork) {
+      Quickshell.execDetached([
+        "setsid", "uwsm-app", "--",
+        "xdg-terminal-exec", "--dir=" + s.resumeCwd,
+        "claude", "agents"
+      ])
+      return
+    }
     // Argument array, never an interpolated shell string: cwd and id come
-    // from disk and are untrusted data (PRD §10).
+    // from disk and are untrusted data (PRD §10). The wrapper keeps the
+    // terminal open when claude exits with an error.
     var cmd = [
       "setsid", "uwsm-app", "--",
-      "xdg-terminal-exec", "--dir=" + s.resumeCwd,
-      "claude", "--resume", s.id
+      "xdg-terminal-exec", root.resumerPath, s.resumeCwd, s.id
     ]
     // Fork: inherit the context in a NEW session id, the original stays
     // untouched.
-    if (fork) cmd.push("--fork-session")
+    if (fork) cmd.push("--fork")
     Quickshell.execDetached(cmd)
   }
 
@@ -397,6 +408,7 @@ Item {
     // ↪ marks a fallback: the home dir is gone, resume lands elsewhere —
     // shown, never silent (PRD §5).
     var parts = [s.cwdFallback ? "↪ " + homeAbbrev(s.resumeCwd) : homeAbbrev(s.cwd)]
+    if (s.running) parts.unshift("● live" + (s.running === "bg" ? " (bg)" : ""))
     if (s.gitBranch) parts.push(s.gitBranch)
     var when = relativeDate(s.lastActivity)
     if (when) parts.push(when)

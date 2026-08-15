@@ -41,7 +41,8 @@ class Base(unittest.TestCase):
         return path
 
     def scan(self, previous=None):
-        return idx.scan(self.projects, previous)
+        # Hermetic: never read the real ~/.claude/sessions from tests.
+        return idx.scan(self.projects, previous, os.path.join(self.tmp.name, "no-sessions"))
 
 
 class TestParsing(Base):
@@ -293,6 +294,39 @@ class TestSkills(Base):
         self.assertEqual(skills[0]["name"], "bare")
         self.assertEqual(skills[0]["description"], "")
         self.assertEqual(idx.scan_skills("/nonexistent"), [])
+
+
+class TestRunning(Base):
+    def write_state(self, name, obj):
+        d = os.path.join(self.tmp.name, "sessions")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
+            json.dump(obj, fh)
+        return d
+
+    def test_alive_pid_marks_running_dead_pid_does_not(self):
+        d = self.write_state("1.json", {"sessionId": "alive", "pid": os.getpid(), "kind": "bg"})
+        self.write_state("2.json", {"sessionId": "dead", "pid": 2 ** 22 + 999983, "kind": "bg"})
+        self.write_state("3.json", {"sessionId": "nokind", "pid": os.getpid()})
+        running = idx.scan_running(d)
+        self.assertEqual(running, {"alive": "bg", "nokind": "interactive"})
+
+    def test_malformed_state_and_missing_dir_tolerated(self):
+        d = self.write_state("bad.json", ["not", "a", "dict"])
+        with open(os.path.join(d, "junk.json"), "w") as fh:
+            fh.write("{nope")
+        self.assertEqual(idx.scan_running(d), {})
+        self.assertEqual(idx.scan_running("/nonexistent"), {})
+
+    def test_running_field_lands_on_indexed_sessions(self):
+        self.write_session("-p", "s1", jsonl(
+            {"type": "user", "cwd": "/a", "isSidechain": False},
+        ))
+        d = self.write_state("1.json", {"sessionId": "s1", "pid": os.getpid(), "kind": "bg"})
+        s = idx.scan(self.projects, sessions_dir=d)["sessions"][0]
+        self.assertEqual(s["running"], "bg")
+        s2 = idx.scan(self.projects, sessions_dir="/nonexistent")["sessions"][0]
+        self.assertIsNone(s2["running"])
 
 
 class TestCacheFile(Base):
