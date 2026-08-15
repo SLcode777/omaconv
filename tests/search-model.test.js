@@ -140,6 +140,15 @@ test("styled excerpt escapes markup and highlights the match", () => {
   assert.ok(styled.includes("<font color=\"#ff0000\">cible &amp; co</font>"))
 })
 
+test("resume command quotes cwd and id as data", () => {
+  assert.equal(
+    model.resumeCommand("/home/lucy/mes projets", "abc-123"),
+    "cd '/home/lucy/mes projets' && claude --resume 'abc-123'")
+  assert.equal(
+    model.resumeCommand("/tmp/l'atelier; rm -rf /", "id"),
+    "cd '/tmp/l'\\''atelier; rm -rf /' && claude --resume 'id'")
+})
+
 test("prepare tolerates malformed sessions", () => {
   const prepared = model.prepare([null, "junk", session({ id: "ok", prompts: null, title: null, cwd: null })])
   assert.equal(prepared.length, 1)

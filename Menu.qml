@@ -46,8 +46,21 @@ Item {
   property string fontFamily: Style.font.menuFamily
   property int contentMargin: Style.spacing.panelPadding
   property int rowHeight: Style.space(44)
-  property int cardWidth: Math.min(Style.space(560), panel.width - Style.gapsOut * 2)
+  // Preview (PRD F4): side pane when the screen is wide enough, otherwise
+  // two extra lines under the selected row.
+  readonly property bool widePreview: panel.width >= Style.space(1000)
+  property int previewWidth: Style.space(300)
+  property int cardWidth: Math.min(widePreview ? Style.space(900) : Style.space(560), panel.width - Style.gapsOut * 2)
   property int cardHeight: Math.min(Style.space(520), panel.height - Style.gapsOut * 2)
+
+  readonly property var selectedSession: (root.results.length > 0
+    && root.selectedIndex >= 0 && root.selectedIndex < root.results.length)
+    ? root.results[root.selectedIndex].session : null
+  readonly property string previewFirst: (selectedSession && Array.isArray(selectedSession.prompts)
+    && selectedSession.prompts.length > 0) ? selectedSession.prompts[0] : ""
+  readonly property string previewLast: (selectedSession && Array.isArray(selectedSession.prompts)
+    && selectedSession.prompts.length > 1)
+    ? selectedSession.prompts[selectedSession.prompts.length - 1] : ""
 
   function open(payloadJson) {
     root.opened = true
@@ -106,9 +119,37 @@ Item {
     resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
   }
 
+  function sessionAt(index) {
+    return (index >= 0 && index < root.results.length) ? root.results[index].session : null
+  }
+
+  // Copy works even when the cwd folder is gone — it is the fallback the
+  // PRD §9 prescribes for vanished directories. Only a missing cwd blocks it.
+  function copyCommand(index) {
+    var s = root.sessionAt(index)
+    if (!s || !s.cwd) return
+    Quickshell.execDetached(["wl-copy", Search.resumeCommand(s.cwd, s.id)])
+    root.dismiss()
+  }
+
+  function openInEditor(index) {
+    var s = root.sessionAt(index)
+    if (!s || s.cwdExists !== true) return
+    root.dismiss()
+    Quickshell.execDetached(["setsid", "uwsm-app", "--", "omarchy-launch-editor", s.cwd])
+  }
+
+  function revealTranscript(index) {
+    var s = root.sessionAt(index)
+    if (!s || !s.transcriptPath) return
+    root.dismiss()
+    var dir = s.transcriptPath.substring(0, s.transcriptPath.lastIndexOf("/"))
+    Quickshell.execDetached(["setsid", "uwsm-app", "--", "nautilus", "--new-window", dir])
+  }
+
   function resumeIndex(index) {
-    if (index < 0 || index >= root.results.length) return
-    var s = root.results[index].session
+    var s = root.sessionAt(index)
+    if (!s) return
     // A session whose cwd is gone cannot be resumed in place (PRD §9).
     if (!s.cwdExists || !s.cwd) return
     root.dismiss()
@@ -220,7 +261,14 @@ Item {
             root.select(1)
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            root.resumeIndex(root.selectedIndex)
+            if (event.modifiers & Qt.ControlModifier) root.copyCommand(root.selectedIndex)
+            else root.resumeIndex(root.selectedIndex)
+            event.accepted = true
+          } else if (event.key === Qt.Key_O && event.modifiers === Qt.ControlModifier) {
+            root.openInEditor(root.selectedIndex)
+            event.accepted = true
+          } else if (event.key === Qt.Key_T && event.modifiers === Qt.ControlModifier) {
+            root.revealTranscript(root.selectedIndex)
             event.accepted = true
           } else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
             root.setFilter(root.filterText + event.text)
@@ -247,13 +295,19 @@ Item {
           elide: Text.ElideRight
         }
 
-        ListView {
-          id: resultList
+        Item {
           width: parent.width
           height: parent.height - y - footer.height - Style.spacing.md
-          model: root.results
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
+
+          ListView {
+            id: resultList
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: root.widePreview ? parent.width - root.previewWidth - Style.spacing.lg : parent.width
+            model: root.results
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
 
           delegate: Rectangle {
             id: row
@@ -264,9 +318,11 @@ Item {
             readonly property bool current: index === root.selectedIndex
             readonly property bool resumable: session.cwdExists === true
             readonly property bool hasExcerpt: modelData.excerpt !== null && modelData.excerpt !== undefined
+            // Narrow-screen preview: two extra lines under the selected row.
+            readonly property bool inlinePreview: current && !root.widePreview
 
             width: resultList.width
-            height: root.rowHeight + (hasExcerpt ? Style.font.bodySmall + Style.space(6) : 0)
+            height: contentCol.height + Style.space(14)
             radius: root.cornerRadius
             color: current ? root.selectedBackground : "transparent"
 
@@ -283,6 +339,7 @@ Item {
             }
 
             Column {
+              id: contentCol
               anchors.left: parent.left
               anchors.right: returnHint.left
               anchors.leftMargin: Style.space(14)
@@ -326,6 +383,30 @@ Item {
                 font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
               }
+
+              Text {
+                visible: row.inlinePreview && root.previewFirst !== ""
+                width: parent.width
+                text: "› " + root.previewFirst
+                color: root.selectedText
+                opacity: 0.75
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                visible: row.inlinePreview && root.previewLast !== ""
+                width: parent.width
+                text: "» " + root.previewLast
+                color: root.selectedText
+                opacity: 0.75
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                elide: Text.ElideRight
+              }
             }
 
             Text {
@@ -349,23 +430,90 @@ Item {
             }
           }
 
-          Text {
-            anchors.centerIn: parent
-            visible: root.results.length === 0
-            text: root.filterText
-              ? "No matches for “" + root.filterText + "”"
-              : "No conversations indexed yet"
-            color: root.foreground
-            opacity: 0.58
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
+            Text {
+              anchors.centerIn: parent
+              visible: root.results.length === 0
+              text: root.filterText
+                ? "No matches for “" + root.filterText + "”"
+                : "No conversations indexed yet"
+              color: root.foreground
+              opacity: 0.58
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+            }
+          }
+
+          // Side preview (PRD F4): first prompt + latest prompt of the
+          // selection — enough to recognize a conversation without any LLM.
+          Column {
+            visible: root.widePreview
+            width: root.previewWidth
+            anchors.right: parent.right
+            anchors.top: parent.top
+            spacing: Style.spacing.sm
+
+            Text {
+              width: parent.width
+              visible: root.previewFirst !== ""
+              text: "FIRST PROMPT"
+              color: root.foreground
+              opacity: 0.4
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              width: parent.width
+              visible: root.previewFirst !== ""
+              text: root.previewFirst
+              color: root.foreground
+              opacity: 0.75
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              maximumLineCount: 9
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              visible: root.previewLast !== ""
+              text: "LAST PROMPT"
+              color: root.foreground
+              opacity: 0.4
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              width: parent.width
+              visible: root.previewLast !== ""
+              text: root.previewLast
+              color: root.foreground
+              opacity: 0.75
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              maximumLineCount: 7
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              visible: root.selectedSession !== null && root.previewFirst === ""
+              text: "(no prompts recorded)"
+              color: root.foreground
+              opacity: 0.4
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
           }
         }
 
         Text {
           id: footer
           width: parent.width
-          text: "↵ resume   ·   esc close"
+          text: "↵ resume · ^↵ copy cmd · ^o editor · ^t transcript · esc close"
           color: root.foreground
           opacity: 0.45
           font.family: root.fontFamily

@@ -135,6 +135,17 @@ function search(prepared, query, limit) {
   return scored.slice(0, limit)
 }
 
+// cwd and session id come from disk: quote them as data, single-quote
+// POSIX style, so a hostile path cannot inject into the copied command
+// (PRD §10).
+function shellQuote(text) {
+  return "'" + String(text).replace(/'/g, "'\\''") + "'"
+}
+
+function resumeCommand(cwd, id) {
+  return "cd " + shellQuote(cwd) + " && claude --resume " + shellQuote(id)
+}
+
 function escapeStyled(text) {
   return String(text)
     .replace(/&/g, "&amp;")
