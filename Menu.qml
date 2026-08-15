@@ -4,6 +4,7 @@ import Quickshell.Wayland
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "SearchModel.js" as Search
 
 // Omaconv — Claude Code conversation resume palette (PRD M2).
 // The QML never reads the .jsonl transcripts: it displays the index that
@@ -16,7 +17,10 @@ Item {
 
   property bool opened: false
   property int selectedIndex: 0
+  property string filterText: ""
   property var sessions: []
+  property var prepared: []
+  property var results: []
 
   readonly property string stateDir: {
     var xdg = Quickshell.env("XDG_STATE_HOME")
@@ -47,7 +51,9 @@ Item {
 
   function open(payloadJson) {
     root.opened = true
+    root.filterText = ""
     root.selectedIndex = 0
+    root.rebuild()
     // Freshness (PRD §6): show the cache instantly, reindex in the
     // background, let the FileView reload if anything changed.
     if (!reindex.running) reindex.running = true
@@ -76,18 +82,33 @@ Item {
     }
     var list = parsed && Array.isArray(parsed.sessions) ? parsed.sessions : []
     root.sessions = list
-    if (root.selectedIndex >= list.length) root.selectedIndex = Math.max(0, list.length - 1)
+    root.prepared = Search.prepare(list)
+    root.rebuild()
+  }
+
+  // Empty query: the 10 most recent (PRD F2). Otherwise search all three
+  // fields, capped at 50 rows.
+  function rebuild() {
+    var out = Search.search(root.prepared, root.filterText, root.filterText ? 50 : 10)
+    root.results = out
+    if (root.selectedIndex >= out.length) root.selectedIndex = Math.max(0, out.length - 1)
+  }
+
+  function setFilter(next) {
+    root.filterText = next
+    root.selectedIndex = 0
+    root.rebuild()
   }
 
   function select(delta) {
-    if (root.sessions.length === 0) return
-    root.selectedIndex = (root.selectedIndex + delta + root.sessions.length) % root.sessions.length
+    if (root.results.length === 0) return
+    root.selectedIndex = (root.selectedIndex + delta + root.results.length) % root.results.length
     resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
   }
 
   function resumeIndex(index) {
-    if (index < 0 || index >= root.sessions.length) return
-    var s = root.sessions[index]
+    if (index < 0 || index >= root.results.length) return
+    var s = root.results[index].session
     // A session whose cwd is gone cannot be resumed in place (PRD §9).
     if (!s.cwdExists || !s.cwd) return
     root.dismiss()
@@ -186,7 +207,11 @@ Item {
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
           if (event.key === Qt.Key_Escape) {
-            root.dismiss()
+            if (root.filterText) root.setFilter("")
+            else root.dismiss()
+            event.accepted = true
+          } else if (Util.editsFilter(event, root.filterText)) {
+            root.setFilter(Util.editedFilter(event, root.filterText))
             event.accepted = true
           } else if (event.key === Qt.Key_Up) {
             root.select(-1)
@@ -196,6 +221,9 @@ Item {
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.resumeIndex(root.selectedIndex)
+            event.accepted = true
+          } else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
+            root.setFilter(root.filterText + event.text)
             event.accepted = true
           }
         }
@@ -211,9 +239,9 @@ Item {
 
         Text {
           width: parent.width
-          text: root.sessions.length + " conversations"
+          text: root.filterText || ("Search " + root.sessions.length + " conversations…")
           color: root.foreground
-          opacity: 0.58
+          opacity: root.filterText ? 1 : 0.58
           font.family: root.fontFamily
           font.pixelSize: Style.font.heading
           elide: Text.ElideRight
@@ -223,7 +251,7 @@ Item {
           id: resultList
           width: parent.width
           height: parent.height - y - footer.height - Style.spacing.md
-          model: root.sessions
+          model: root.results
           clip: true
           boundsBehavior: Flickable.StopAtBounds
 
@@ -232,11 +260,13 @@ Item {
             required property int index
             required property var modelData
 
+            readonly property var session: modelData.session
             readonly property bool current: index === root.selectedIndex
-            readonly property bool resumable: modelData.cwdExists === true
+            readonly property bool resumable: session.cwdExists === true
+            readonly property bool hasExcerpt: modelData.excerpt !== null && modelData.excerpt !== undefined
 
             width: resultList.width
-            height: root.rowHeight
+            height: root.rowHeight + (hasExcerpt ? Style.font.bodySmall + Style.space(6) : 0)
             radius: root.cornerRadius
             color: current ? root.selectedBackground : "transparent"
 
@@ -262,7 +292,7 @@ Item {
 
               Text {
                 width: parent.width
-                text: row.modelData.title || row.modelData.id
+                text: row.session.title || row.session.id
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 1 : 0.4
                 font.family: root.fontFamily
@@ -272,9 +302,26 @@ Item {
 
               Text {
                 width: parent.width
-                text: root.subtitleFor(row.modelData)
+                text: root.subtitleFor(row.session)
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 0.58 : 0.3
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
+
+              // Why this row matched: the prompt excerpt, term highlighted
+              // (PRD §7 — without it the hit is unexplainable).
+              Text {
+                visible: row.hasExcerpt
+                width: parent.width
+                text: row.hasExcerpt
+                  ? Search.excerptStyled(row.modelData.excerpt,
+                      "" + (row.current ? root.selectedText : root.foreground))
+                  : ""
+                textFormat: Text.StyledText
+                color: row.current ? root.selectedText : root.foreground
+                opacity: row.resumable ? 0.75 : 0.3
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
@@ -304,8 +351,10 @@ Item {
 
           Text {
             anchors.centerIn: parent
-            visible: root.sessions.length === 0
-            text: "No conversations indexed yet"
+            visible: root.results.length === 0
+            text: root.filterText
+              ? "No matches for “" + root.filterText + "”"
+              : "No conversations indexed yet"
             color: root.foreground
             opacity: 0.58
             font.family: root.fontFamily
