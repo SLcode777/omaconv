@@ -26,6 +26,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.projects = os.path.join(self.tmp.name, "projects")
+        self.codex = os.path.join(self.tmp.name, "codex")
         self.state = os.path.join(self.tmp.name, "state")
         os.makedirs(self.projects)
 
@@ -40,9 +41,18 @@ class Base(unittest.TestCase):
             fh.write(content)
         return path
 
+    def write_codex_session(self, name, content):
+        day = os.path.join(self.codex, "2026", "08", "16")
+        os.makedirs(day, exist_ok=True)
+        path = os.path.join(day, "rollout-" + name + ".jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return path
+
     def scan(self, previous=None):
-        # Hermetic: never read the real ~/.claude/sessions from tests.
-        return idx.scan(self.projects, previous, os.path.join(self.tmp.name, "no-sessions"))
+        # Hermetic: never read the real ~/.claude/sessions or ~/.codex.
+        return idx.scan(self.projects, previous,
+                        os.path.join(self.tmp.name, "no-sessions"), self.codex)
 
 
 class TestParsing(Base):
@@ -342,8 +352,72 @@ class TestCacheFile(Base):
         self.assertEqual(idx.load_cache(self.state), index)
 
     def test_missing_projects_dir_yields_empty_index(self):
-        result = idx.scan(os.path.join(self.tmp.name, "inexistant"))
+        result = idx.scan(os.path.join(self.tmp.name, "inexistant"),
+                          sessions_dir=os.path.join(self.tmp.name, "no-sessions"),
+                          codex_dir=os.path.join(self.tmp.name, "no-codex"))
         self.assertEqual(result["sessions"], [])
+
+
+def codex_lines(session_id, cwd, prompts, branch=None, ts="2026-08-16T10:00:00.000Z"):
+    git = {"branch": branch} if branch else {}
+    lines = [{"timestamp": ts, "type": "session_meta",
+              "payload": {"session_id": session_id, "cwd": cwd, "git": git}}]
+    for i, prompt in enumerate(prompts):
+        lines.append({"timestamp": ts[:15] + str(i) + ts[16:], "type": "response_item",
+                      "payload": {"type": "message", "role": "user",
+                                  "content": [{"type": "input_text", "text": prompt}]}})
+    return jsonl(*lines)
+
+
+class TestCodex(Base):
+    def test_codex_session_indexed_with_agent_field(self):
+        self.write_codex_session("a", codex_lines(
+            "uuid-1", self.tmp.name, ["fix the login page", "now the tests"], branch="main"))
+        sessions = self.scan()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        s = sessions[0]
+        self.assertEqual(s["agent"], "codex")
+        self.assertEqual(s["id"], "uuid-1")
+        self.assertEqual(s["title"], "fix the login page")
+        self.assertEqual(s["prompts"], ["fix the login page", "now the tests"])
+        self.assertEqual(s["cwd"], self.tmp.name)
+        self.assertEqual(s["gitBranch"], "main")
+        self.assertFalse(s["cwdFallback"])
+
+    def test_codex_noise_prompts_excluded(self):
+        self.write_codex_session("b", codex_lines("uuid-2", self.tmp.name, [
+            "<environment_context>\n  <cwd>/x</cwd>",
+            "# Context from my IDE setup",
+            "<turn_aborted>\nThe user aborted",
+            "a real question"]))
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["prompts"], ["a real question"])
+        self.assertEqual(s["title"], "a real question")
+
+    def test_codex_without_meta_uses_filename_id(self):
+        self.write_codex_session("2026-08-16T10-00-00-uuid-3", jsonl(
+            {"timestamp": "2026-08-16T10:00:00.000Z", "type": "response_item",
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "hello"}]}}))
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["id"], "rollout-2026-08-16T10-00-00-uuid-3")
+        self.assertIsNone(s["cwd"])
+        self.assertIsNone(s["resumeCwd"])
+
+    def test_claude_and_codex_merged_by_recency(self):
+        self.write_session("proj", "claude-1", jsonl(
+            {"type": "last-prompt", "lastPrompt": "old claude", "timestamp": "2026-08-14T09:00:00Z"}))
+        self.write_codex_session("c", codex_lines(
+            "uuid-4", self.tmp.name, ["newer codex"], ts="2026-08-16T09:00:00.000Z"))
+        sessions = self.scan()["sessions"]
+        self.assertEqual([s["agent"] for s in sessions], ["codex", "claude"])
+
+    def test_codex_incremental_reuses_cache(self):
+        self.write_codex_session("d", codex_lines("uuid-5", self.tmp.name, ["stable"]))
+        first = self.scan()
+        marker = dict(first["sessions"][0], title="CACHED")
+        again = self.scan(previous={"sessions": [marker]})
+        self.assertEqual(again["sessions"][0]["title"], "CACHED")
 
 
 if __name__ == "__main__":

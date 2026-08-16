@@ -68,6 +68,16 @@ Item {
     root.confirmDeleteSession = null
   }
 
+  // Per-agent capabilities: features an agent's CLI or transcript format
+  // cannot support are greyed out, never silently broken. Claude keeps
+  // everything; Codex has no custom-title lines (rename), no
+  // --fork-session, no live-session state files.
+  function agentCaps(agent) {
+    if (agent === "codex")
+      return { fork: false, rename: false }
+    return { fork: true, rename: true }
+  }
+
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
   // the menu style this palette too.
   property color background: Color.menu.background
@@ -266,7 +276,7 @@ Item {
 
   function startRename(index) {
     var s = root.sessionAt(index)
-    if (!s || !s.transcriptPath) return
+    if (!s || !s.transcriptPath || !root.agentCaps(s.agent).rename) return
     root.renameText = ""
     root.renameSession = s
   }
@@ -335,7 +345,7 @@ Item {
     var s = root.sessionAt(index)
     var cwd = s ? (s.resumeCwd || s.cwd) : null
     if (!cwd) return
-    Quickshell.execDetached(["wl-copy", Search.resumeCommand(cwd, s.id)])
+    Quickshell.execDetached(["wl-copy", Search.resumeCommand(cwd, s.id, s.agent)])
     root.dismiss()
   }
 
@@ -360,7 +370,7 @@ Item {
     root.dismiss()
     Quickshell.execDetached([
       "setsid", "uwsm-app", "--", "xdg-terminal-exec",
-      root.grepperPath, pattern, s.transcriptPath
+      root.grepperPath, pattern, s.transcriptPath, s.agent || "claude"
     ])
   }
 
@@ -386,6 +396,8 @@ Item {
     // resumeCwd: the session's home dir, or the most recent surviving cwd
     // when the home is gone (shown with ↪). Null → nothing left (PRD §9).
     if (!s.resumeCwd) return
+    // Agents without fork support resume normally instead.
+    if (fork && !root.agentCaps(s.agent).fork) fork = false
     root.dismiss()
     // A session already running as a background agent refuses --resume:
     // open the attach picker instead (forking it is fine, though).
@@ -402,7 +414,8 @@ Item {
     // terminal open when claude exits with an error.
     var cmd = [
       "setsid", "uwsm-app", "--",
-      "xdg-terminal-exec", root.resumerPath, s.resumeCwd, s.id
+      "xdg-terminal-exec", root.resumerPath, s.resumeCwd, s.id,
+      "--agent", s.agent || "claude"
     ]
     // Fork: inherit the context in a NEW session id, the original stays
     // untouched.
@@ -473,6 +486,10 @@ Item {
     // ↪ marks a fallback: the home dir is gone, resume lands elsewhere —
     // shown, never silent (PRD §5).
     var parts = [escapeHtml(s.cwdFallback ? "↪ " + homeAbbrev(s.resumeCwd) : homeAbbrev(s.cwd))]
+    // Agent badge, only when it isn't the default agent — 100 rows of
+    // "claude" would be noise.
+    if (s.agent && s.agent !== "claude")
+      parts.unshift("<font color=\"" + ("" + root.selectedText) + "\">" + escapeHtml(s.agent) + "</font>")
     if (s.running) parts.unshift("<font color=\"" + ("" + root.highlight) + "\">● live"
       + (s.running === "bg" ? " (bg)" : "") + "</font>")
     if (s.gitBranch) parts.push(escapeHtml(s.gitBranch))
@@ -497,7 +514,8 @@ Item {
       var k = root.selectedSkill
       if (s && s.transcriptPath) {
         root.previewPendingId = s.id
-        previewProc.command = ["python3", root.rendererPath, "--preview", s.transcriptPath]
+        previewProc.command = ["python3", root.rendererPath, "--preview",
+          "--agent", s.agent || "claude", s.transcriptPath]
       } else if (k && k.path) {
         root.previewPendingId = k.path
         previewProc.command = ["python3", root.rendererPath, "--skill", k.path]
@@ -822,12 +840,28 @@ Item {
               color: root.highlight
             }
 
+            // Agent mark (assets/<agent>.svg), like every row is signed.
+            Image {
+              visible: !row.isHeader && !row.isSkill && row.session !== null
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(18)
+              height: Style.space(18)
+              source: row.session
+                ? Qt.resolvedUrl("assets/" + (row.session.agent || "claude") + ".svg") : ""
+              sourceSize: Qt.size(width, height)
+              fillMode: Image.PreserveAspectFit
+              asynchronous: true
+              smooth: true
+            }
+
             Column {
               id: contentCol
               visible: !row.isHeader
               anchors.left: parent.left
               anchors.right: returnHint.left
-              anchors.leftMargin: Style.space(18)
+              anchors.leftMargin: row.isSkill ? Style.space(18) : Style.space(46)
               anchors.rightMargin: Style.spacing.md
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(3)
@@ -1039,7 +1073,8 @@ Item {
                 PaneButton {
                   icon: ""
                   label: "FORK"
-                  enabled: !!(root.selectedSession && root.selectedSession.resumeCwd)
+                  enabled: !!(root.selectedSession && root.selectedSession.resumeCwd
+                    && root.agentCaps(root.selectedSession.agent).fork)
                   onActivated: root.resumeIndex(root.selectedIndex, true)
                 }
 
@@ -1062,7 +1097,8 @@ Item {
                 PaneButton {
                   icon: ""
                   label: "RENAME"
-                  enabled: !!(root.selectedSession && root.selectedSession.transcriptPath)
+                  enabled: !!(root.selectedSession && root.selectedSession.transcriptPath
+                    && root.agentCaps(root.selectedSession.agent).rename)
                   onActivated: root.startRename(root.selectedIndex)
                 }
 
@@ -1109,7 +1145,7 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: (parent.modelData.who === "you" ? "YOU" : "CLAUDE")
+                  text: (parent.modelData.who === "you" ? "YOU" : String(parent.modelData.who).toUpperCase())
                     + (parent.modelData.time ? "  ·  " + parent.modelData.time : "")
                   color: root.selectedText
                   opacity: 0.9

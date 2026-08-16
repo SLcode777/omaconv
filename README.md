@@ -1,10 +1,11 @@
 # Omaconv
 
 Omaconv is a resume palette for [Claude Code](https://claude.com/claude-code)
-conversations, built for the [Omarchy](https://omarchy.org/) shell. It lists
-every conversation on the machine, finds them by searching their title, their
-directory **and everything you actually typed in them**, and resumes any of
-them in one keystroke — always in the right working directory.
+and [Codex](https://developers.openai.com/codex/cli) conversations, built for
+the [Omarchy](https://omarchy.org/) shell. It lists every conversation on the
+machine, finds them by searching their title, their directory **and
+everything you actually typed in them**, and resumes any of them in one
+keystroke — always in the right working directory.
 
 ![Omaconv screenshot](preview.png)
 
@@ -62,6 +63,13 @@ directory that still does (marked `↪`), or are greyed out when none survives.
 Conversations currently running as a background agent show a `● live` badge;
 resuming one opens `claude agents` so you can attach instead.
 
+Codex sessions are indexed alongside Claude's, with the same full-text
+search over your prompts, and carry an agent badge; typing an agent's name
+filters to it. Features an agent cannot support are greyed out instead of
+silently broken — Codex has no rename or fork, so those buttons dim. A
+resumed session keeps exactly the permission mode you left it with: Omaconv
+never injects permission-bypass flags.
+
 ## How it works
 
 A small Python indexer (`omaconv-index`, stdlib only) scans the transcripts
@@ -89,7 +97,7 @@ conversations.
 
 - Omarchy with the Quickshell shell (plugin API v1)
 - `python3` (standard library only)
-- `claude` on the `PATH`
+- `claude` on the `PATH` (and `codex` to resume Codex sessions)
 
 Optional: `ugrep` (`omarchy pkg add ugrep`) upgrades `Ctrl+G` from a pager to
 an interactive search TUI.

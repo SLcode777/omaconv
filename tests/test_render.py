@@ -115,6 +115,46 @@ class TestPreview(unittest.TestCase):
         self.assertEqual(rnd.preview("/nonexistent/x.jsonl", io.StringIO()), 1)
 
 
+class TestCodexTurns(unittest.TestCase):
+    def lines(self):
+        return [
+            {"timestamp": "2026-08-16T09:00:00.000Z", "type": "session_meta",
+             "payload": {"session_id": "u1", "cwd": "/tmp"}},
+            {"timestamp": "2026-08-16T09:00:01.000Z", "type": "response_item",
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "<environment_context>noise"}]}},
+            {"timestamp": "2026-08-16T09:00:02.000Z", "type": "response_item",
+             "payload": {"type": "message", "role": "developer",
+                         "content": [{"type": "input_text", "text": "dev instructions"}]}},
+            {"timestamp": "2026-08-16T09:00:03.000Z", "type": "response_item",
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "real question"}]}},
+            {"timestamp": "2026-08-16T09:00:04.000Z", "type": "response_item",
+             "payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text", "text": "the answer"}]}},
+        ]
+
+    def test_codex_dialogue_and_labels(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+            for o in self.lines():
+                fh.write(json.dumps(o) + "\n")
+            path = fh.name
+        out = io.StringIO()
+        try:
+            code = rnd.preview(path, out, turns_for=rnd.iter_codex_turns)
+            rendered = io.StringIO()
+            rnd.render(path, rendered, turns_for=rnd.iter_codex_turns)
+        finally:
+            os.unlink(path)
+        self.assertEqual(code, 0)
+        turns = json.loads(out.getvalue())["turns"]
+        self.assertEqual([(t["who"], t["text"]) for t in turns],
+                         [("you", "real question"), ("codex", "the answer")])
+        self.assertEqual(turns[0]["time"], "2026-08-16 09:00")
+        self.assertIn("───── CODEX", rendered.getvalue())
+        self.assertNotIn("dev instructions", rendered.getvalue())
+
+
 def skill_json(text):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write(text)

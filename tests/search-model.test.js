@@ -151,6 +151,27 @@ test("resume command quotes cwd and id as data", () => {
     "cd '/tmp/l'\\''atelier; rm -rf /' && claude --resume 'id'")
 })
 
+test("resume command per agent", () => {
+  assert.equal(
+    model.resumeCommand("/tmp", "u1", "codex"),
+    "cd '/tmp' && codex resume 'u1'")
+  assert.equal(
+    model.resumeCommand("/tmp", "u1", "claude"),
+    "cd '/tmp' && claude --resume 'u1'")
+})
+
+test("agent name is searchable as a prefix", () => {
+  const prepared = model.prepare([
+    { id: "a", agent: "codex", title: "fix login", cwd: "/tmp/x", prompts: [], lastActivity: "2026-08-16" },
+    { id: "b", title: "codex is mentioned here", cwd: "/tmp/y", prompts: [], lastActivity: "2026-08-15" },
+    { id: "c", title: "unrelated", cwd: "/tmp/z", prompts: ["something else"], lastActivity: "2026-08-14" }
+  ])
+  const hits = model.search(prepared, "codex", 10)
+  assert.equal(hits.map(h => h.session.id).join(","), "b,a")
+  const prefix = model.search(prepared, "cod", 10)
+  assert.equal(prefix.map(h => h.session.id).join(","), "b,a")
+})
+
 test("skill search: name outranks description, empty query lists all", () => {
   const prepared = model.prepareSkills([
     { name: "omarchy", description: "desktop config", path: "/a" },

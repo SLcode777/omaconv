@@ -7,6 +7,7 @@
 var TitleWordStart = 120
 var TitleSubstring = 100
 var CwdSubstring = 60
+var AgentName = 50
 var PromptSubstring = 40
 var ExcerptBefore = 24
 var ExcerptAfter = 56
@@ -37,6 +38,7 @@ function prepare(sessions) {
       session: s,
       normTitle: normalize(s.title),
       normCwd: normalize(s.cwd),
+      normAgent: normalize(s.agent || "claude"),
       normPrompts: normPrompts
     })
   }
@@ -55,6 +57,10 @@ function matchTerm(entry, term) {
     return { score: wordStartsWith(entry.normTitle, term, at) ? TitleWordStart : TitleSubstring, prompt: null }
   if (entry.normCwd.indexOf(term) !== -1)
     return { score: CwdSubstring, prompt: null }
+  // Agent name as a prefix ("cod" → codex sessions), so one word filters
+  // the list down to an agent.
+  if (entry.normAgent && entry.normAgent.indexOf(term) === 0)
+    return { score: AgentName, prompt: null }
   for (var i = 0; i < entry.normPrompts.length; i++) {
     var p = entry.normPrompts[i].indexOf(term)
     if (p !== -1)
@@ -216,8 +222,11 @@ function shellQuote(text) {
   return "'" + String(text).replace(/'/g, "'\\''") + "'"
 }
 
-function resumeCommand(cwd, id) {
-  return "cd " + shellQuote(cwd) + " && claude --resume " + shellQuote(id)
+function resumeCommand(cwd, id, agent) {
+  var invoke = agent === "codex"
+    ? "codex resume " + shellQuote(id)
+    : "claude --resume " + shellQuote(id)
+  return "cd " + shellQuote(cwd) + " && " + invoke
 }
 
 function escapeStyled(text) {

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""omaconv-index — scans ~/.claude/projects and produces the sessions JSON index.
+"""omaconv-index — scans agent session stores and produces the JSON index.
 
+Agents: Claude Code (~/.claude/projects) and Codex (~/.codex/sessions).
 Output: ~/.local/state/omaconv/index.json (0600) + stdout.
 Incremental: only re-reads files whose mtime or size changed.
 Stdlib only. See PRD.md §4-§6.
 """
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -33,6 +35,10 @@ def default_skills_dir():
 
 def default_sessions_dir():
     return os.path.expanduser("~/.claude/sessions")
+
+
+def default_codex_dir():
+    return os.path.expanduser("~/.codex/sessions")
 
 
 def scan_running(sessions_dir):
@@ -230,9 +236,9 @@ def list_transcripts(projects_dir):
     return paths
 
 
-def _session_for(path, cached):
+def _session_for(path, cached, parse, build):
     """Reuse the cached entry if mtime and size are unchanged,
-    otherwise re-read the transcript."""
+    otherwise re-read the transcript with the agent's parser."""
     try:
         stat = os.stat(path)
     except OSError:
@@ -244,10 +250,101 @@ def _session_for(path, cached):
         and prev.get("sourceSize") == stat.st_size
     ):
         return prev
-    parsed = parse_transcript(path)
+    parsed = parse(path)
     if parsed is None:
         return None
-    return build_session(path, stat, parsed)
+    return build(path, stat, parsed)
+
+
+# --------------------------------------------------------------- codex
+# Codex rollouts: sessions/YYYY/MM/DD/rollout-*.jsonl, lines of
+# {timestamp, type, payload}. User text lives in response_item messages;
+# the leading wrappers below are tooling noise, not something she typed.
+CODEX_NOISE = ("<environment_context", "<turn_aborted", "<user_instructions",
+               "# Context from my IDE")
+
+
+def list_codex_rollouts(codex_dir):
+    return sorted(glob.glob(os.path.join(codex_dir, "*", "*", "*", "rollout-*.jsonl")))
+
+
+def codex_user_text(payload):
+    parts = []
+    for item in payload.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "input_text":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text)
+    text = "\n".join(parts).strip()
+    if not text or text.lstrip().startswith(CODEX_NOISE):
+        return None
+    return text
+
+
+def _ingest_codex(obj, state):
+    kind = obj.get("type")
+    payload = obj.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if kind == "session_meta":
+        sid = _str_field(payload, "session_id", "id")
+        if sid:
+            state["sessionId"] = sid
+        git = payload.get("git")
+        if isinstance(git, dict):
+            branch = _str_field(git, "branch")
+            if branch:
+                state["gitBranch"] = branch
+    if kind in ("session_meta", "turn_context"):
+        cwd = _str_field(payload, "cwd")
+        if cwd and cwd not in state["cwds"]:
+            state["cwds"].append(cwd)
+    elif kind == "response_item" and payload.get("type") == "message" \
+            and payload.get("role") == "user":
+        text = codex_user_text(payload)
+        if text:
+            state["prompts"].append(text)
+    ts = _str_field(obj, "timestamp")
+    if ts and (state["lastTimestamp"] is None or ts > state["lastTimestamp"]):
+        state["lastTimestamp"] = ts
+
+
+def parse_codex_transcript(path):
+    state = {"sessionId": None, "prompts": [], "cwds": [],
+             "gitBranch": None, "lastTimestamp": None}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            obj = _parse_line(line)
+            if obj is not None:
+                _ingest_codex(obj, state)
+    return state
+
+
+def build_codex_session(path, stat, parsed):
+    session_id = parsed["sessionId"] or os.path.basename(path)[: -len(".jsonl")]
+    title = truncate_title(parsed["prompts"][0]) if parsed["prompts"] else session_id
+    last_activity = parsed["lastTimestamp"] or datetime.fromtimestamp(
+        stat.st_mtime, tz=timezone.utc
+    ).isoformat()
+    return {
+        "id": session_id,
+        "agent": "codex",
+        "title": title,
+        "titleSource": "prompt" if parsed["prompts"] else "id",
+        "cwd": parsed["cwds"][0] if parsed["cwds"] else None,
+        "cwds": parsed["cwds"],
+        "gitBranch": parsed["gitBranch"],
+        "version": None,
+        "lastActivity": last_activity,
+        "prompts": parsed["prompts"],
+        "transcriptPath": path,
+        "sourceMtime": stat.st_mtime,
+        "sourceSize": stat.st_size,
+        "sidechainOnly": False,
+    }
 
 
 def _resume_cwd(session):
@@ -265,7 +362,7 @@ def _resume_cwd(session):
     return None, False
 
 
-def scan(projects_dir, previous=None, sessions_dir=None):
+def scan(projects_dir, previous=None, sessions_dir=None, codex_dir=None):
     """Build the index, incrementally when `previous` (the prior index) is given."""
     running = scan_running(sessions_dir or default_sessions_dir())
     cached = {}
@@ -274,15 +371,21 @@ def scan(projects_dir, previous=None, sessions_dir=None):
             if isinstance(session, dict) and session.get("transcriptPath"):
                 cached[session["transcriptPath"]] = session
 
+    sources = [
+        (list_transcripts(projects_dir), parse_transcript, build_session),
+        (list_codex_rollouts(codex_dir if codex_dir is not None else default_codex_dir()),
+         parse_codex_transcript, build_codex_session),
+    ]
     sessions = []
-    for path in list_transcripts(projects_dir):
-        session = _session_for(path, cached)
-        if session is None or session.get("sidechainOnly"):
-            continue
-        session["cwdExists"] = bool(session.get("cwd")) and os.path.isdir(session["cwd"])
-        session["resumeCwd"], session["cwdFallback"] = _resume_cwd(session)
-        session["running"] = running.get(session["id"])
-        sessions.append(session)
+    for paths, parse, build in sources:
+        for path in paths:
+            session = _session_for(path, cached, parse, build)
+            if session is None or session.get("sidechainOnly"):
+                continue
+            session["cwdExists"] = bool(session.get("cwd")) and os.path.isdir(session["cwd"])
+            session["resumeCwd"], session["cwdFallback"] = _resume_cwd(session)
+            session["running"] = running.get(session["id"])
+            sessions.append(session)
 
     sessions.sort(key=lambda s: s.get("lastActivity") or "", reverse=True)
     return {"schemaVersion": SCHEMA_VERSION, "sessions": sessions}
@@ -382,13 +485,14 @@ def main(argv=None):
     parser.add_argument("--projects-dir", default=default_projects_dir())
     parser.add_argument("--skills-dir", default=default_skills_dir())
     parser.add_argument("--sessions-dir", default=default_sessions_dir())
+    parser.add_argument("--codex-dir", default=default_codex_dir())
     parser.add_argument("--state-dir", default=default_state_dir())
     parser.add_argument("--full", action="store_true", help="ignore the cache, re-read everything")
     parser.add_argument("--quiet", action="store_true", help="write nothing to stdout")
     args = parser.parse_args(argv)
 
     previous = None if args.full else load_cache(args.state_dir)
-    index = scan(args.projects_dir, previous, args.sessions_dir)
+    index = scan(args.projects_dir, previous, args.sessions_dir, args.codex_dir)
     index["skills"] = scan_skills(args.skills_dir)
     write_cache(args.state_dir, index)
     if not args.quiet:

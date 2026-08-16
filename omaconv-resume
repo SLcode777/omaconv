@@ -1,12 +1,23 @@
 #!/bin/sh
 # Resume a conversation in its directory, keeping the terminal open when
-# claude exits with an error so the message is actually readable.
-# usage: omaconv-resume <cwd> <session-id> [--fork]
-# Args are positional, never interpolated.
+# the agent exits with an error so the message is actually readable.
+# usage: omaconv-resume <cwd> <session-id> [--fork] [--agent <name>]
+# Args are positional/flagged, never interpolated. No permission-bypass
+# flags are ever added: the session resumes exactly as the user left it.
 
 cwd="$1"
 id="$2"
-fork="$3"
+shift 2
+
+fork=""
+agent="claude"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fork) fork=1 ;;
+    --agent) agent="$2"; shift ;;
+  esac
+  shift
+done
 
 if ! cd -- "$cwd" 2>/dev/null; then
   printf 'omaconv: cannot cd into %s\npress enter to close\n' "$cwd"
@@ -14,16 +25,23 @@ if ! cd -- "$cwd" 2>/dev/null; then
   exit 1
 fi
 
-if [ "$fork" = "--fork" ]; then
-  claude --resume "$id" --fork-session
-else
-  claude --resume "$id"
-fi
+case "$agent" in
+  codex)
+    codex resume "$id"
+    ;;
+  *)
+    if [ -n "$fork" ]; then
+      claude --resume "$id" --fork-session
+    else
+      claude --resume "$id"
+    fi
+    ;;
+esac
 status=$?
 
 # 130 = SIGINT (user quit), not an error worth holding the terminal for.
 if [ "$status" -ne 0 ] && [ "$status" -ne 130 ]; then
-  printf '\nclaude exited with status %s — press enter to close\n' "$status"
+  printf '\n%s exited with status %s — press enter to close\n' "$agent" "$status"
   read -r _
 fi
 exit "$status"
