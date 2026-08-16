@@ -224,8 +224,12 @@ def iter_opencode_turns(path, session_id):
         role = meta.get("role") if isinstance(meta, dict) else None
         if role not in ("user", "assistant") or mid not in texts:
             continue
-        when = datetime.fromtimestamp(
-            (created or 0) / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        # SQLite affinity doesn't guarantee an int, nor a sane magnitude.
+        try:
+            when = datetime.fromtimestamp(
+                created / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError, OverflowError, OSError):
+            when = ""
         yield {"who": "you" if role == "user" else "opencode",
                "time": when,
                "text": "\n".join(t.rstrip() for t in texts[mid])}

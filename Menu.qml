@@ -68,24 +68,16 @@ Item {
     root.confirmDeleteSession = null
   }
 
-  // Per-agent capabilities: features an agent's CLI or transcript format
-  // cannot support are greyed out, never silently broken. Claude keeps
-  // everything; Codex has no custom-title lines (rename), no
-  // --fork-session, no live-session state files. OpenCode forks fine,
-  // but rename/delete would mean writing into its shared SQLite db.
-  // Antigravity's transcript is only a log of its real store
-  // (conversations/<id>.db) — trashing or appending to it changes nothing.
-  // Pi: one file per session and a --fork flag, but no append-safe rename.
+  // What each agent's CLI/store can support is greyed out, never silently
+  // broken — the per-agent rationale lives in PRD §F9. Default = claude.
+  readonly property var agentCapsTable: ({
+    codex: { fork: false, rename: false, remove: true },
+    opencode: { fork: true, rename: false, remove: false },
+    antigravity: { fork: false, rename: false, remove: false },
+    pi: { fork: true, rename: false, remove: true }
+  })
   function agentCaps(agent) {
-    if (agent === "codex")
-      return { fork: false, rename: false, remove: true }
-    if (agent === "opencode")
-      return { fork: true, rename: false, remove: false }
-    if (agent === "antigravity")
-      return { fork: false, rename: false, remove: false }
-    if (agent === "pi")
-      return { fork: true, rename: false, remove: true }
-    return { fork: true, rename: true, remove: true }
+    return root.agentCapsTable[agent] || { fork: true, rename: true, remove: true }
   }
 
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
@@ -380,8 +372,7 @@ Item {
     root.dismiss()
     Quickshell.execDetached([
       "setsid", "uwsm-app", "--", "xdg-terminal-exec",
-      root.grepperPath, pattern, s.transcriptPath, s.agent || "claude",
-      s.agent === "opencode" ? s.id : ""
+      root.grepperPath, pattern, s.transcriptPath, s.agent || "claude", s.id
     ])
   }
 
@@ -528,12 +519,10 @@ Item {
       var k = root.selectedSkill
       if (s && s.transcriptPath) {
         root.previewPendingId = s.id
-        var cmd = ["python3", root.rendererPath, "--preview",
-          "--agent", s.agent || "claude"]
-        // Shared-store agents: the file is the db, the id picks the session.
-        if (s.agent === "opencode") cmd.push("--session", s.id)
-        cmd.push(s.transcriptPath)
-        previewProc.command = cmd
+        // --session is always passed; the renderer alone knows which
+        // agents' stores are shared and actually need it.
+        previewProc.command = ["python3", root.rendererPath, "--preview",
+          "--agent", s.agent || "claude", "--session", s.id, s.transcriptPath]
       } else if (k && k.path) {
         root.previewPendingId = k.path
         previewProc.command = ["python3", root.rendererPath, "--skill", k.path]

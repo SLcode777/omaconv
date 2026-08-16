@@ -13,6 +13,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -326,8 +327,20 @@ def parse_codex_transcript(path):
     return state
 
 
+_UUID_TAIL = re.compile(
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$")
+
+
+def _codex_fallback_id(path):
+    """`codex resume` wants a bare UUID; the rollout filename embeds it
+    after the timestamp. Whole basename only as a last resort."""
+    match = _UUID_TAIL.search(os.path.basename(path))
+    return match.group(1) if match else os.path.basename(path)[: -len(".jsonl")]
+
+
 def build_codex_session(path, stat, parsed):
-    session_id = parsed["sessionId"] or os.path.basename(path)[: -len(".jsonl")]
+    session_id = parsed["sessionId"] or _codex_fallback_id(path)
     title = truncate_title(parsed["prompts"][0]) if parsed["prompts"] else session_id
     last_activity = parsed["lastTimestamp"] or datetime.fromtimestamp(
         stat.st_mtime, tz=timezone.utc
@@ -587,11 +600,17 @@ def scan_opencode(db_path):
         rows = db.execute(
             "SELECT id, title, directory, time_updated FROM session"
             " WHERE parent_id IS NULL ORDER BY time_updated").fetchall()
-        prompt_rows = db.execute(
-            "SELECT p.session_id, p.data FROM part p"
-            " JOIN message m ON p.message_id = m.id"
-            " WHERE json_extract(m.data, '$.role') = 'user'"
-            " ORDER BY p.time_created").fetchall()
+        try:
+            # json_valid: one hand-corrupted row must not abort the query;
+            # and if prompts fail entirely, sessions still get indexed.
+            prompt_rows = db.execute(
+                "SELECT p.session_id, p.data FROM part p"
+                " JOIN message m ON p.message_id = m.id"
+                " WHERE json_valid(m.data)"
+                " AND json_extract(m.data, '$.role') = 'user'"
+                " ORDER BY p.time_created").fetchall()
+        except sqlite3.Error:
+            prompt_rows = []
     except sqlite3.Error:
         return []
     finally:
@@ -612,8 +631,13 @@ def scan_opencode(db_path):
         prompts = prompts_by_session.get(sid, [])
         picked, source = _opencode_title(title, prompts, sid)
         cwd = directory if isinstance(directory, str) and directory else None
-        last = datetime.fromtimestamp(
-            (updated or 0) / 1000.0, tz=timezone.utc).isoformat()
+        # SQLite affinity doesn't guarantee an int, nor a sane magnitude.
+        try:
+            last = datetime.fromtimestamp(
+                updated / 1000.0, tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            last = datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc).isoformat()
         sessions.append({
             "id": sid,
             "agent": "opencode",

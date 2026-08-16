@@ -435,6 +435,16 @@ class TestCodex(Base):
         self.assertIsNone(s["cwd"])
         self.assertIsNone(s["resumeCwd"])
 
+    def test_codex_without_meta_extracts_uuid_from_filename(self):
+        # `codex resume` wants the bare UUID, not the rollout filename.
+        self.write_codex_session(
+            "2026-08-16T10-00-00-0199a8bc-1a2b-7c3d-8e4f-0123456789ab", jsonl(
+                {"timestamp": "2026-08-16T10:00:00.000Z", "type": "response_item",
+                 "payload": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": "hello"}]}}))
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["id"], "0199a8bc-1a2b-7c3d-8e4f-0123456789ab")
+
     def test_claude_and_codex_merged_by_recency(self):
         self.write_session("proj", "claude-1", jsonl(
             {"type": "last-prompt", "lastPrompt": "old claude", "timestamp": "2026-08-14T09:00:00Z"}))
@@ -549,6 +559,19 @@ class TestOpencode(Base):
         with open(self.opencode_db, "w", encoding="utf-8") as fh:
             fh.write("not a sqlite file")
         self.assertEqual(self.scan()["sessions"], [])
+
+    def test_bad_timestamp_and_corrupt_row_never_fail_the_index(self):
+        write_opencode_db(self.opencode_db, [{
+            "id": "ses_6", "updated": "garbage",
+            "turns": [("user", "still indexed")]}])
+        db = sqlite3.connect(self.opencode_db)
+        db.execute("INSERT INTO message VALUES ('bad-m', 'ses_6', 1, 'not json')")
+        db.commit()
+        db.close()
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["id"], "ses_6")
+        self.assertEqual(s["prompts"], ["still indexed"])
+        self.assertIn("T", s["lastActivity"])  # mtime fallback, valid ISO
 
 
 def agy_lines(prompts, ts="2026-08-16T11:45:08Z", extra=()):

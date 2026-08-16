@@ -294,6 +294,33 @@ class TestOpencodeTurns(unittest.TestCase):
         self.assertEqual(
             rnd.preview("/nonexistent/opencode.db", io.StringIO(), turns_for=reader), 1)
 
+    def test_bad_time_created_yields_turn_without_time(self):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as fh:
+            path = fh.name
+        os.unlink(path)
+        db = sqlite3.connect(path)
+        db.executescript(
+            "CREATE TABLE message (id TEXT, session_id TEXT,"
+            " time_created INTEGER, data TEXT);"
+            "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT,"
+            " time_created INTEGER, data TEXT);")
+        db.execute("INSERT INTO message VALUES ('m1', 's', 'garbage', ?)",
+                   (json.dumps({"role": "user"}),))
+        db.execute("INSERT INTO part VALUES ('p1', 'm1', 's', 1, ?)",
+                   (json.dumps({"type": "text", "text": "hi"}),))
+        db.commit()
+        db.close()
+        out = io.StringIO()
+        try:
+            code = rnd.preview(path, out,
+                               turns_for=lambda p: rnd.iter_opencode_turns(p, "s"))
+        finally:
+            os.unlink(path)
+        self.assertEqual(code, 0)
+        turns = json.loads(out.getvalue())["turns"]
+        self.assertEqual([(t["who"], t["text"], t["time"]) for t in turns],
+                         [("you", "hi", "")])
+
 
 def skill_json(text):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
