@@ -71,11 +71,21 @@ Item {
   // Per-agent capabilities: features an agent's CLI or transcript format
   // cannot support are greyed out, never silently broken. Claude keeps
   // everything; Codex has no custom-title lines (rename), no
-  // --fork-session, no live-session state files.
+  // --fork-session, no live-session state files. OpenCode forks fine,
+  // but rename/delete would mean writing into its shared SQLite db.
+  // Antigravity's transcript is only a log of its real store
+  // (conversations/<id>.db) — trashing or appending to it changes nothing.
+  // Pi: one file per session and a --fork flag, but no append-safe rename.
   function agentCaps(agent) {
     if (agent === "codex")
-      return { fork: false, rename: false }
-    return { fork: true, rename: true }
+      return { fork: false, rename: false, remove: true }
+    if (agent === "opencode")
+      return { fork: true, rename: false, remove: false }
+    if (agent === "antigravity")
+      return { fork: false, rename: false, remove: false }
+    if (agent === "pi")
+      return { fork: true, rename: false, remove: true }
+    return { fork: true, rename: true, remove: true }
   }
 
   // [menu] surface tokens, same idiom as omarchy.emojis: themes that style
@@ -370,24 +380,28 @@ Item {
     root.dismiss()
     Quickshell.execDetached([
       "setsid", "uwsm-app", "--", "xdg-terminal-exec",
-      root.grepperPath, pattern, s.transcriptPath, s.agent || "claude"
+      root.grepperPath, pattern, s.transcriptPath, s.agent || "claude",
+      s.agent === "opencode" ? s.id : ""
     ])
   }
 
   function requestDelete(index) {
     var s = root.sessionAt(index)
-    if (s) root.confirmDeleteSession = s
+    // Never offer to trash a shared store (opencode's single db).
+    if (s && root.agentCaps(s.agent).remove) root.confirmDeleteSession = s
   }
 
   function confirmDelete() {
     var s = root.confirmDeleteSession
     root.confirmDeleteSession = null
     if (!s || !s.transcriptPath) return
-    // To the trash, never rm — recoverable. The session subdir (subagents)
-    // may not exist; gio processes each argument independently.
-    root.enqueueOp(["gio", "trash",
-      s.transcriptPath,
-      s.transcriptPath.slice(0, -".jsonl".length)], "delete")
+    // To the trash, never rm — recoverable. Only Claude keeps a sibling
+    // <id>/ subdir (subagents); it may not exist, gio processes each
+    // argument independently.
+    var args = ["gio", "trash", s.transcriptPath]
+    if ((s.agent || "claude") === "claude")
+      args.push(s.transcriptPath.slice(0, -".jsonl".length))
+    root.enqueueOp(args, "delete")
   }
 
   function resumeIndex(index, fork) {
@@ -514,8 +528,12 @@ Item {
       var k = root.selectedSkill
       if (s && s.transcriptPath) {
         root.previewPendingId = s.id
-        previewProc.command = ["python3", root.rendererPath, "--preview",
-          "--agent", s.agent || "claude", s.transcriptPath]
+        var cmd = ["python3", root.rendererPath, "--preview",
+          "--agent", s.agent || "claude"]
+        // Shared-store agents: the file is the db, the id picks the session.
+        if (s.agent === "opencode") cmd.push("--session", s.id)
+        cmd.push(s.transcriptPath)
+        previewProc.command = cmd
       } else if (k && k.path) {
         root.previewPendingId = k.path
         previewProc.command = ["python3", root.rendererPath, "--skill", k.path]
@@ -1105,7 +1123,8 @@ Item {
                 PaneButton {
                   icon: ""
                   label: "DELETE"
-                  enabled: !!(root.selectedSession && root.selectedSession.transcriptPath)
+                  enabled: !!(root.selectedSession && root.selectedSession.transcriptPath
+                    && root.agentCaps(root.selectedSession.agent).remove)
                   onActivated: root.requestDelete(root.selectedIndex)
                 }
               }

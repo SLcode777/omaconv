@@ -156,6 +156,15 @@ test("resume command per agent", () => {
     model.resumeCommand("/tmp", "u1", "codex"),
     "cd '/tmp' && codex resume 'u1'")
   assert.equal(
+    model.resumeCommand("/tmp", "ses_1", "opencode"),
+    "cd '/tmp' && opencode --session 'ses_1'")
+  assert.equal(
+    model.resumeCommand("/tmp", "conv-1", "antigravity"),
+    "cd '/tmp' && agy --conversation 'conv-1'")
+  assert.equal(
+    model.resumeCommand("/tmp", "uuid-1", "pi"),
+    "cd '/tmp' && pi --session 'uuid-1'")
+  assert.equal(
     model.resumeCommand("/tmp", "u1", "claude"),
     "cd '/tmp' && claude --resume 'u1'")
 })

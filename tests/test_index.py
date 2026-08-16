@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import sqlite3
 import stat as stat_mod
 import tempfile
 import unittest
@@ -27,6 +28,9 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.projects = os.path.join(self.tmp.name, "projects")
         self.codex = os.path.join(self.tmp.name, "codex")
+        self.opencode_db = os.path.join(self.tmp.name, "opencode.db")
+        self.agy = os.path.join(self.tmp.name, "antigravity-cli")
+        self.pi = os.path.join(self.tmp.name, "pi-sessions")
         self.state = os.path.join(self.tmp.name, "state")
         os.makedirs(self.projects)
 
@@ -49,10 +53,34 @@ class Base(unittest.TestCase):
             fh.write(content)
         return path
 
+    def write_antigravity_session(self, conv_id, content, workspace=None):
+        logs = os.path.join(self.agy, "brain", conv_id, ".system_generated", "logs")
+        os.makedirs(logs, exist_ok=True)
+        path = os.path.join(logs, "transcript.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        if workspace:
+            with open(os.path.join(self.agy, "history.jsonl"), "a",
+                      encoding="utf-8") as fh:
+                fh.write(json.dumps({"display": "x", "timestamp": 0,
+                                     "workspace": workspace,
+                                     "conversationId": conv_id}) + "\n")
+        return path
+
+    def write_pi_session(self, name, content):
+        pdir = os.path.join(self.pi, "--home-lucy--")
+        os.makedirs(pdir, exist_ok=True)
+        path = os.path.join(pdir, name + ".jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return path
+
     def scan(self, previous=None):
-        # Hermetic: never read the real ~/.claude/sessions or ~/.codex.
+        # Hermetic: never read the real ~/.claude/sessions, ~/.codex,
+        # opencode db, ~/.gemini/antigravity-cli or ~/.pi.
         return idx.scan(self.projects, previous,
-                        os.path.join(self.tmp.name, "no-sessions"), self.codex)
+                        os.path.join(self.tmp.name, "no-sessions"), self.codex,
+                        self.opencode_db, self.agy, self.pi)
 
 
 class TestParsing(Base):
@@ -354,7 +382,10 @@ class TestCacheFile(Base):
     def test_missing_projects_dir_yields_empty_index(self):
         result = idx.scan(os.path.join(self.tmp.name, "inexistant"),
                           sessions_dir=os.path.join(self.tmp.name, "no-sessions"),
-                          codex_dir=os.path.join(self.tmp.name, "no-codex"))
+                          codex_dir=os.path.join(self.tmp.name, "no-codex"),
+                          opencode_db=os.path.join(self.tmp.name, "no.db"),
+                          antigravity_dir=os.path.join(self.tmp.name, "no-agy"),
+                          pi_dir=os.path.join(self.tmp.name, "no-pi"))
         self.assertEqual(result["sessions"], [])
 
 
@@ -418,6 +449,195 @@ class TestCodex(Base):
         marker = dict(first["sessions"][0], title="CACHED")
         again = self.scan(previous={"sessions": [marker]})
         self.assertEqual(again["sessions"][0]["title"], "CACHED")
+
+
+# Minimal mirror of the real opencode.db (only the columns the indexer reads).
+OPENCODE_SCHEMA = """
+CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT,
+  directory TEXT, time_created INTEGER, time_updated INTEGER);
+CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+  time_created INTEGER, data TEXT);
+CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+  time_created INTEGER, data TEXT);
+"""
+
+
+def write_opencode_db(path, sessions):
+    """sessions: [{id, title, directory, updated, parent_id,
+    turns: [(role, text) or (role, text, synthetic)]}]"""
+    db = sqlite3.connect(path)
+    db.executescript(OPENCODE_SCHEMA)
+    tick = 0
+    for s in sessions:
+        db.execute("INSERT INTO session VALUES (?,?,?,?,?,?)",
+                   (s["id"], s.get("parent_id"),
+                    s.get("title", "New session - 2026-08-16T10:00:00.000Z"),
+                    s.get("directory", "/tmp"),
+                    s.get("updated", 1786875817000), s.get("updated", 1786875817000)))
+        for n, turn in enumerate(s.get("turns", [])):
+            tick += 1
+            mid = "%s-m%d" % (s["id"], n)
+            db.execute("INSERT INTO message VALUES (?,?,?,?)",
+                       (mid, s["id"], tick, json.dumps({"role": turn[0]})))
+            part = {"type": "text", "text": turn[1]}
+            if len(turn) > 2 and turn[2]:
+                part["synthetic"] = True
+            db.execute("INSERT INTO part VALUES (?,?,?,?,?)",
+                       (mid + "-p0", mid, s["id"], tick, json.dumps(part)))
+    db.commit()
+    db.close()
+
+
+class TestOpencode(Base):
+    def test_opencode_session_indexed_with_agent_field(self):
+        write_opencode_db(self.opencode_db, [{
+            "id": "ses_1", "directory": self.tmp.name,
+            "updated": 1786875817749,
+            "turns": [("user", "test session minimax"), ("assistant", "ok")]}])
+        sessions = self.scan()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        s = sessions[0]
+        self.assertEqual(s["agent"], "opencode")
+        self.assertEqual(s["id"], "ses_1")
+        self.assertEqual(s["title"], "test session minimax")
+        self.assertEqual(s["titleSource"], "prompt")
+        self.assertEqual(s["prompts"], ["test session minimax"])
+        self.assertEqual(s["cwd"], self.tmp.name)
+        self.assertEqual(s["transcriptPath"], self.opencode_db)
+        self.assertTrue(s["lastActivity"].startswith("2026-08-16T"))
+
+    def test_opencode_real_title_wins_over_prompt(self):
+        write_opencode_db(self.opencode_db, [{
+            "id": "ses_2", "title": "Fixing the login flow",
+            "turns": [("user", "please fix login")]}])
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["title"], "Fixing the login flow")
+        self.assertEqual(s["titleSource"], "ai")
+
+    def test_opencode_synthetic_and_noise_parts_excluded(self):
+        write_opencode_db(self.opencode_db, [{
+            "id": "ses_3",
+            "turns": [("user", "<system-reminder>opened file</system-reminder>", True),
+                      ("user", "<system-reminder>plain noise too"),
+                      ("user", "the real prompt")]}])
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["prompts"], ["the real prompt"])
+
+    def test_opencode_child_sessions_excluded(self):
+        write_opencode_db(self.opencode_db, [
+            {"id": "ses_top", "turns": [("user", "parent work")]},
+            {"id": "ses_sub", "parent_id": "ses_top",
+             "turns": [("user", "subagent work")]}])
+        sessions = self.scan()["sessions"]
+        self.assertEqual([s["id"] for s in sessions], ["ses_top"])
+
+    def test_opencode_placeholder_title_without_prompts_uses_id(self):
+        write_opencode_db(self.opencode_db, [{"id": "ses_4"}])
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["title"], "ses_4")
+        self.assertEqual(s["titleSource"], "id")
+
+    def test_opencode_sessions_never_cached_by_db_path(self):
+        write_opencode_db(self.opencode_db, [{
+            "id": "ses_5", "turns": [("user", "fresh every scan")]}])
+        first = self.scan()
+        marker = dict(first["sessions"][0], title="STALE")
+        again = self.scan(previous={"sessions": [marker]})
+        self.assertEqual(again["sessions"][0]["title"], "fresh every scan")
+
+    def test_corrupt_db_yields_no_opencode_sessions(self):
+        with open(self.opencode_db, "w", encoding="utf-8") as fh:
+            fh.write("not a sqlite file")
+        self.assertEqual(self.scan()["sessions"], [])
+
+
+def agy_lines(prompts, ts="2026-08-16T11:45:08Z", extra=()):
+    lines = []
+    for i, prompt in enumerate(prompts):
+        lines.append({
+            "step_index": i, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+            "status": "DONE", "created_at": ts,
+            "content": "<USER_REQUEST>\n%s\n</USER_REQUEST>\n"
+                       "<ADDITIONAL_METADATA>\nlocal time\n</ADDITIONAL_METADATA>" % prompt})
+    lines.extend(extra)
+    return jsonl(*lines)
+
+
+class TestAntigravity(Base):
+    def test_antigravity_session_indexed_with_agent_field(self):
+        self.write_antigravity_session("conv-1", agy_lines(
+            ["gemini testing session", "do you believe in agi ?"]),
+            workspace=self.tmp.name)
+        sessions = self.scan()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        s = sessions[0]
+        self.assertEqual(s["agent"], "antigravity")
+        self.assertEqual(s["id"], "conv-1")
+        self.assertEqual(s["title"], "gemini testing session")
+        self.assertEqual(s["prompts"],
+                         ["gemini testing session", "do you believe in agi ?"])
+        self.assertEqual(s["cwd"], self.tmp.name)
+        self.assertEqual(s["lastActivity"], "2026-08-16T11:45:08Z")
+        self.assertFalse(s["cwdFallback"])
+
+    def test_antigravity_without_history_entry_has_no_cwd(self):
+        self.write_antigravity_session("conv-2", agy_lines(["orphan prompt"]))
+        s = self.scan()["sessions"][0]
+        self.assertIsNone(s["cwd"])
+        self.assertIsNone(s["resumeCwd"])
+
+    def test_antigravity_machinery_steps_are_not_prompts(self):
+        self.write_antigravity_session("conv-3", agy_lines(["only real one"], extra=[
+            {"source": "SYSTEM", "type": "CHECKPOINT", "status": "DONE",
+             "created_at": "2026-08-16T11:46:00Z", "content": "{{ CHECKPOINT 0 }}"},
+            {"source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+             "created_at": "2026-08-16T11:46:01Z", "content": "an answer"},
+        ]), workspace="/tmp")
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["prompts"], ["only real one"])
+        # lastActivity still tracks every step's timestamp.
+        self.assertEqual(s["lastActivity"], "2026-08-16T11:46:01Z")
+
+
+def pi_lines(session_id, cwd, prompts, ts="2026-08-16T12:04:00.000Z"):
+    lines = [{"type": "session", "version": 3, "id": session_id,
+              "timestamp": ts, "cwd": cwd}]
+    for prompt in prompts:
+        lines.append({"type": "message", "id": "m", "timestamp": ts,
+                      "message": {"role": "user",
+                                  "content": [{"type": "text", "text": prompt}]}})
+    return jsonl(*lines)
+
+
+class TestPi(Base):
+    def test_pi_session_indexed_with_agent_field(self):
+        self.write_pi_session("2026-08-16T12-03-57-409Z_uuid-1", pi_lines(
+            "uuid-1", self.tmp.name, ["testing pi session", "what model are you?"]))
+        sessions = self.scan()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        s = sessions[0]
+        self.assertEqual(s["agent"], "pi")
+        self.assertEqual(s["id"], "uuid-1")
+        self.assertEqual(s["title"], "testing pi session")
+        self.assertEqual(s["prompts"], ["testing pi session", "what model are you?"])
+        self.assertEqual(s["cwd"], self.tmp.name)
+        self.assertFalse(s["cwdFallback"])
+
+    def test_pi_slash_commands_are_not_prompts(self):
+        self.write_pi_session("s", pi_lines(
+            "uuid-2", "/tmp", ["/model", "a real question", "/exit"]))
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["prompts"], ["a real question"])
+        self.assertEqual(s["title"], "a real question")
+
+    def test_pi_without_header_uses_filename_id(self):
+        self.write_pi_session("2026-08-16T12-00-00-000Z_uuid-3", jsonl(
+            {"type": "message", "timestamp": "2026-08-16T12:00:00.000Z",
+             "message": {"role": "user",
+                         "content": [{"type": "text", "text": "hello"}]}}))
+        s = self.scan()["sessions"][0]
+        self.assertEqual(s["id"], "2026-08-16T12-00-00-000Z_uuid-3")
+        self.assertIsNone(s["cwd"])
 
 
 if __name__ == "__main__":

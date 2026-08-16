@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """omaconv-index — scans agent session stores and produces the JSON index.
 
-Agents: Claude Code (~/.claude/projects) and Codex (~/.codex/sessions).
+Agents: Claude Code (~/.claude/projects), Codex (~/.codex/sessions),
+OpenCode (~/.local/share/opencode/opencode.db), Antigravity CLI
+(~/.gemini/antigravity-cli) and Pi (~/.pi/agent/sessions).
 Output: ~/.local/state/omaconv/index.json (0600) + stdout.
 Incremental: only re-reads files whose mtime or size changed.
 Stdlib only. See PRD.md §4-§6.
@@ -11,6 +13,7 @@ import argparse
 import glob
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 
@@ -347,6 +350,291 @@ def build_codex_session(path, stat, parsed):
     }
 
 
+# ------------------------------------------------------------------ pi
+# Pi sessions: one JSONL per session under sessions/<encoded-cwd>/, with a
+# header line {type: "session", id, cwd, timestamp} — cwd in plain text.
+
+
+def default_pi_dir():
+    return os.path.expanduser("~/.pi/agent/sessions")
+
+
+def list_pi_sessions(pi_dir):
+    return sorted(glob.glob(os.path.join(pi_dir, "*", "*.jsonl")))
+
+
+def pi_user_text(message):
+    parts = []
+    for item in message.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text)
+    text = "\n".join(parts).strip()
+    # Slash commands (/exit, /model …) are logged as user messages.
+    if not text or text.startswith("/"):
+        return None
+    return text
+
+
+def _ingest_pi(obj, state):
+    kind = obj.get("type")
+    if kind == "session":
+        sid = _str_field(obj, "id")
+        if sid:
+            state["sessionId"] = sid
+        cwd = _str_field(obj, "cwd")
+        if cwd and cwd not in state["cwds"]:
+            state["cwds"].append(cwd)
+    elif kind == "message":
+        message = obj.get("message")
+        if isinstance(message, dict) and message.get("role") == "user":
+            text = pi_user_text(message)
+            if text:
+                state["prompts"].append(text)
+    ts = _str_field(obj, "timestamp")
+    if ts and (state["lastTimestamp"] is None or ts > state["lastTimestamp"]):
+        state["lastTimestamp"] = ts
+
+
+def parse_pi_transcript(path):
+    state = {"sessionId": None, "prompts": [], "cwds": [], "lastTimestamp": None}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            obj = _parse_line(line)
+            if obj is not None:
+                _ingest_pi(obj, state)
+    return state
+
+
+def build_pi_session(path, stat, parsed):
+    session_id = parsed["sessionId"] or os.path.basename(path)[: -len(".jsonl")]
+    title = truncate_title(parsed["prompts"][0]) if parsed["prompts"] else session_id
+    last_activity = parsed["lastTimestamp"] or datetime.fromtimestamp(
+        stat.st_mtime, tz=timezone.utc
+    ).isoformat()
+    return {
+        "id": session_id,
+        "agent": "pi",
+        "title": title,
+        "titleSource": "prompt" if parsed["prompts"] else "id",
+        "cwd": parsed["cwds"][0] if parsed["cwds"] else None,
+        "cwds": parsed["cwds"],
+        "gitBranch": None,
+        "version": None,
+        "lastActivity": last_activity,
+        "prompts": parsed["prompts"],
+        "transcriptPath": path,
+        "sourceMtime": stat.st_mtime,
+        "sourceSize": stat.st_size,
+        "sidechainOnly": False,
+    }
+
+
+# --------------------------------------------------------- antigravity
+# Antigravity CLI (`agy`): one readable transcript per conversation under
+# brain/<id>/.system_generated/logs/transcript.jsonl. The workspace (cwd)
+# is not in the transcript — it lives in the CLI's own history.jsonl.
+
+
+def default_antigravity_dir():
+    return os.path.expanduser("~/.gemini/antigravity-cli")
+
+
+def list_antigravity_transcripts(agy_dir):
+    return sorted(glob.glob(os.path.join(
+        agy_dir, "brain", "*", ".system_generated", "logs", "transcript.jsonl")))
+
+
+def antigravity_workspaces(agy_dir):
+    """conversationId → workspace dir, from the CLI's prompt history."""
+    out = {}
+    try:
+        fh = open(os.path.join(agy_dir, "history.jsonl"),
+                  encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            obj = _parse_line(line)
+            if obj is None:
+                continue
+            cid = _str_field(obj, "conversationId")
+            workspace = _str_field(obj, "workspace")
+            if cid and workspace:
+                out[cid] = workspace
+    return out
+
+
+def antigravity_user_text(content):
+    """The text she typed, unwrapped from <USER_REQUEST>…</USER_REQUEST>
+    (the rest of the step is injected metadata)."""
+    if not isinstance(content, str):
+        return None
+    start = content.find("<USER_REQUEST>")
+    if start == -1:
+        return None
+    end = content.find("</USER_REQUEST>", start)
+    if end == -1:
+        return None
+    text = content[start + len("<USER_REQUEST>"):end].strip()
+    return text or None
+
+
+def parse_antigravity_transcript(path):
+    state = {"prompts": [], "lastTimestamp": None}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            obj = _parse_line(line)
+            if obj is None:
+                continue
+            if obj.get("type") == "USER_INPUT" and obj.get("source") == "USER_EXPLICIT":
+                text = antigravity_user_text(obj.get("content"))
+                if text:
+                    state["prompts"].append(text)
+            ts = _str_field(obj, "created_at")
+            if ts and (state["lastTimestamp"] is None or ts > state["lastTimestamp"]):
+                state["lastTimestamp"] = ts
+    return state
+
+
+def build_antigravity_session(path, stat, parsed, workspaces):
+    # …/brain/<conversation-id>/.system_generated/logs/transcript.jsonl
+    conv_id = os.path.basename(
+        os.path.dirname(os.path.dirname(os.path.dirname(path))))
+    title = truncate_title(parsed["prompts"][0]) if parsed["prompts"] else conv_id
+    last_activity = parsed["lastTimestamp"] or datetime.fromtimestamp(
+        stat.st_mtime, tz=timezone.utc
+    ).isoformat()
+    cwd = workspaces.get(conv_id)
+    return {
+        "id": conv_id,
+        "agent": "antigravity",
+        "title": title,
+        "titleSource": "prompt" if parsed["prompts"] else "id",
+        "cwd": cwd,
+        "cwds": [cwd] if cwd else [],
+        "gitBranch": None,
+        "version": None,
+        "lastActivity": last_activity,
+        "prompts": parsed["prompts"],
+        "transcriptPath": path,
+        "sourceMtime": stat.st_mtime,
+        "sourceSize": stat.st_size,
+        "sidechainOnly": False,
+    }
+
+
+# ------------------------------------------------------------ opencode
+# OpenCode keeps everything in one SQLite db (WAL mode): file stat says
+# nothing about which sessions changed, but the two queries below are
+# milliseconds even at thousands of sessions — always read fresh.
+OPENCODE_NOISE = ("<system-reminder",)
+OPENCODE_PLACEHOLDER = "New session - "
+
+
+def default_opencode_db():
+    return os.path.join(
+        os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+        "opencode", "opencode.db",
+    )
+
+
+def _opencode_part_text(raw):
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("type") != "text":
+        return None
+    if data.get("synthetic"):  # injected IDE/system context, not typed
+        return None
+    text = data.get("text")
+    if not isinstance(text, str) or not text.strip() \
+            or text.lstrip().startswith(OPENCODE_NOISE):
+        return None
+    return text.strip()
+
+
+def _opencode_title(title, prompts, session_id):
+    if isinstance(title, str) and title.strip() \
+            and not title.startswith(OPENCODE_PLACEHOLDER):
+        return title.strip(), "ai"
+    if prompts:
+        return truncate_title(prompts[0]), "prompt"
+    return session_id, "id"
+
+
+def scan_opencode(db_path):
+    """One session dict per top-level OpenCode session. Read-only URI so
+    a missing db is never created and a running opencode is never locked;
+    any sqlite error yields an empty list, not a failed index."""
+    if not db_path or not os.path.isfile(db_path):
+        return []
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = db.execute(
+            "SELECT id, title, directory, time_updated FROM session"
+            " WHERE parent_id IS NULL ORDER BY time_updated").fetchall()
+        prompt_rows = db.execute(
+            "SELECT p.session_id, p.data FROM part p"
+            " JOIN message m ON p.message_id = m.id"
+            " WHERE json_extract(m.data, '$.role') = 'user'"
+            " ORDER BY p.time_created").fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+
+    prompts_by_session = {}
+    for sid, raw in prompt_rows:
+        text = _opencode_part_text(raw)
+        if text:
+            prompts_by_session.setdefault(sid, []).append(text)
+
+    try:
+        stat = os.stat(db_path)
+    except OSError:
+        return []
+    sessions = []
+    for sid, title, directory, updated in rows:
+        prompts = prompts_by_session.get(sid, [])
+        picked, source = _opencode_title(title, prompts, sid)
+        cwd = directory if isinstance(directory, str) and directory else None
+        last = datetime.fromtimestamp(
+            (updated or 0) / 1000.0, tz=timezone.utc).isoformat()
+        sessions.append({
+            "id": sid,
+            "agent": "opencode",
+            "title": picked,
+            "titleSource": source,
+            "cwd": cwd,
+            "cwds": [cwd] if cwd else [],
+            "gitBranch": None,
+            "version": None,
+            "lastActivity": last,
+            "prompts": prompts,
+            # The shared db, not a per-session file: preview passes the
+            # session id alongside, delete/rename are capability-gated off.
+            "transcriptPath": db_path,
+            "sourceMtime": stat.st_mtime,
+            "sourceSize": stat.st_size,
+            "sidechainOnly": False,
+        })
+    return sessions
+
+
 def _resume_cwd(session):
     """Where a resume should land. The first cwd (the session's home) when
     it still exists; otherwise the most recent cwd that does — a deliberate
@@ -362,30 +650,46 @@ def _resume_cwd(session):
     return None, False
 
 
-def scan(projects_dir, previous=None, sessions_dir=None, codex_dir=None):
+def _admit(session, sessions, running):
+    if session is None or session.get("sidechainOnly"):
+        return
+    session["cwdExists"] = bool(session.get("cwd")) and os.path.isdir(session["cwd"])
+    session["resumeCwd"], session["cwdFallback"] = _resume_cwd(session)
+    session["running"] = running.get(session["id"])
+    sessions.append(session)
+
+
+def scan(projects_dir, previous=None, sessions_dir=None, codex_dir=None,
+         opencode_db=None, antigravity_dir=None, pi_dir=None):
     """Build the index, incrementally when `previous` (the prior index) is given."""
     running = scan_running(sessions_dir or default_sessions_dir())
     cached = {}
     if previous:
         for session in previous.get("sessions", []):
-            if isinstance(session, dict) and session.get("transcriptPath"):
+            # OpenCode sessions all share the db path — they are always
+            # re-queried, never cached per file.
+            if isinstance(session, dict) and session.get("transcriptPath") \
+                    and session.get("agent") != "opencode":
                 cached[session["transcriptPath"]] = session
 
+    agy_dir = antigravity_dir if antigravity_dir is not None else default_antigravity_dir()
+    agy_workspaces = antigravity_workspaces(agy_dir)
     sources = [
         (list_transcripts(projects_dir), parse_transcript, build_session),
         (list_codex_rollouts(codex_dir if codex_dir is not None else default_codex_dir()),
          parse_codex_transcript, build_codex_session),
+        (list_antigravity_transcripts(agy_dir), parse_antigravity_transcript,
+         lambda p, st, parsed: build_antigravity_session(p, st, parsed, agy_workspaces)),
+        (list_pi_sessions(pi_dir if pi_dir is not None else default_pi_dir()),
+         parse_pi_transcript, build_pi_session),
     ]
     sessions = []
     for paths, parse, build in sources:
         for path in paths:
-            session = _session_for(path, cached, parse, build)
-            if session is None or session.get("sidechainOnly"):
-                continue
-            session["cwdExists"] = bool(session.get("cwd")) and os.path.isdir(session["cwd"])
-            session["resumeCwd"], session["cwdFallback"] = _resume_cwd(session)
-            session["running"] = running.get(session["id"])
-            sessions.append(session)
+            _admit(_session_for(path, cached, parse, build), sessions, running)
+    db_path = opencode_db if opencode_db is not None else default_opencode_db()
+    for session in scan_opencode(db_path):
+        _admit(session, sessions, running)
 
     sessions.sort(key=lambda s: s.get("lastActivity") or "", reverse=True)
     return {"schemaVersion": SCHEMA_VERSION, "sessions": sessions}
@@ -486,13 +790,17 @@ def main(argv=None):
     parser.add_argument("--skills-dir", default=default_skills_dir())
     parser.add_argument("--sessions-dir", default=default_sessions_dir())
     parser.add_argument("--codex-dir", default=default_codex_dir())
+    parser.add_argument("--opencode-db", default=default_opencode_db())
+    parser.add_argument("--antigravity-dir", default=default_antigravity_dir())
+    parser.add_argument("--pi-dir", default=default_pi_dir())
     parser.add_argument("--state-dir", default=default_state_dir())
     parser.add_argument("--full", action="store_true", help="ignore the cache, re-read everything")
     parser.add_argument("--quiet", action="store_true", help="write nothing to stdout")
     args = parser.parse_args(argv)
 
     previous = None if args.full else load_cache(args.state_dir)
-    index = scan(args.projects_dir, previous, args.sessions_dir, args.codex_dir)
+    index = scan(args.projects_dir, previous, args.sessions_dir, args.codex_dir,
+                 args.opencode_db, args.antigravity_dir, args.pi_dir)
     index["skills"] = scan_skills(args.skills_dir)
     write_cache(args.state_dir, index)
     if not args.quiet:

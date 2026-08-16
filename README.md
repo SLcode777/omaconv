@@ -1,7 +1,10 @@
 # Omaconv
 
-Omaconv is a resume palette for [Claude Code](https://claude.com/claude-code)
-and [Codex](https://developers.openai.com/codex/cli) conversations, built for
+Omaconv is a resume palette for [Claude Code](https://claude.com/claude-code),
+[Codex](https://developers.openai.com/codex/cli),
+[OpenCode](https://opencode.ai/),
+[Antigravity](https://antigravity.google/) and
+[Pi](https://github.com/badlogic/pi-mono) conversations, built for
 the [Omarchy](https://omarchy.org/) shell. It lists every conversation on the
 machine, finds them by searching their title, their directory **and
 everything you actually typed in them**, and resumes any of them in one
@@ -63,12 +66,15 @@ directory that still does (marked `↪`), or are greyed out when none survives.
 Conversations currently running as a background agent show a `● live` badge;
 resuming one opens `claude agents` so you can attach instead.
 
-Codex sessions are indexed alongside Claude's, with the same full-text
-search over your prompts, and carry an agent badge; typing an agent's name
-filters to it. Features an agent cannot support are greyed out instead of
-silently broken — Codex has no rename or fork, so those buttons dim. A
-resumed session keeps exactly the permission mode you left it with: Omaconv
-never injects permission-bypass flags.
+Codex, OpenCode, Antigravity CLI and Pi sessions are indexed alongside
+Claude's, with the same full-text search over your prompts, and carry an
+agent badge; typing an agent's name filters to it. Features an agent cannot
+support are greyed out instead of silently broken — Codex has no rename or
+fork; OpenCode forks fine but keeps all sessions in one shared database, so
+rename and delete dim rather than risk it; Antigravity resumes and previews
+only; Pi forks and deletes but has no rename. A resumed session keeps
+exactly the permission mode you left it with: Omaconv never injects
+permission-bypass flags.
 
 ## How it works
 
@@ -97,7 +103,8 @@ conversations.
 
 - Omarchy with the Quickshell shell (plugin API v1)
 - `python3` (standard library only)
-- `claude` on the `PATH` (and `codex` to resume Codex sessions)
+- `claude` on the `PATH` (and `codex` / `opencode` / `agy` / `pi` to resume
+  their sessions)
 
 Optional: `ugrep` (`omarchy pkg add ugrep`) upgrades `Ctrl+G` from a pager to
 an interactive search TUI.

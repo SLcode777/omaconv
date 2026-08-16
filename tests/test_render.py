@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -153,6 +154,145 @@ class TestCodexTurns(unittest.TestCase):
         self.assertEqual(turns[0]["time"], "2026-08-16 09:00")
         self.assertIn("───── CODEX", rendered.getvalue())
         self.assertNotIn("dev instructions", rendered.getvalue())
+
+
+class TestPiTurns(unittest.TestCase):
+    def lines(self):
+        return [
+            {"type": "session", "version": 3, "id": "uuid-1",
+             "timestamp": "2026-08-16T12:03:57.409Z", "cwd": "/home/lucy"},
+            {"type": "message", "timestamp": "2026-08-16T12:04:00.000Z",
+             "message": {"role": "user",
+                         "content": [{"type": "text", "text": "testing pi session"}]}},
+            {"type": "message", "timestamp": "2026-08-16T12:04:05.000Z",
+             "message": {"role": "assistant",
+                         "content": [{"type": "thinking", "thinking": "hmm"},
+                                     {"type": "text", "text": "Pi session is active."}]}},
+            {"type": "message", "timestamp": "2026-08-16T12:04:10.000Z",
+             "message": {"role": "toolResult",
+                         "content": [{"type": "text", "text": "PI_MODEL=gpt-5.5"}]}},
+            {"type": "message", "timestamp": "2026-08-16T12:04:20.000Z",
+             "message": {"role": "user",
+                         "content": [{"type": "text", "text": "/exit"}]}},
+        ]
+
+    def test_pi_dialogue_and_labels(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+            for o in self.lines():
+                fh.write(json.dumps(o) + "\n")
+            path = fh.name
+        out = io.StringIO()
+        rendered = io.StringIO()
+        try:
+            code = rnd.preview(path, out, turns_for=rnd.iter_pi_turns)
+            rnd.render(path, rendered, turns_for=rnd.iter_pi_turns)
+        finally:
+            os.unlink(path)
+        self.assertEqual(code, 0)
+        turns = json.loads(out.getvalue())["turns"]
+        self.assertEqual([(t["who"], t["text"]) for t in turns],
+                         [("you", "testing pi session"),
+                          ("pi", "Pi session is active.")])
+        self.assertEqual(turns[0]["time"], "2026-08-16 12:04")
+        self.assertIn("───── PI", rendered.getvalue())
+        self.assertNotIn("hmm", rendered.getvalue())
+        self.assertNotIn("PI_MODEL", rendered.getvalue())
+        self.assertNotIn("/exit", rendered.getvalue())
+
+
+class TestAntigravityTurns(unittest.TestCase):
+    def lines(self):
+        return [
+            {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+             "status": "DONE", "created_at": "2026-08-16T11:45:08Z",
+             "content": "<USER_REQUEST>\ngemini testing session\n</USER_REQUEST>\n"
+                        "<ADDITIONAL_METADATA>\nlocal time\n</ADDITIONAL_METADATA>"},
+            {"step_index": 1, "source": "SYSTEM", "type": "CONVERSATION_HISTORY",
+             "status": "DONE", "created_at": "2026-08-16T11:45:08Z"},
+            {"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE",
+             "status": "DONE", "created_at": "2026-08-16T11:45:09Z",
+             "content": "Ready! How can I help?"},
+            {"step_index": 3, "source": "SYSTEM", "type": "CHECKPOINT",
+             "status": "DONE", "created_at": "2026-08-16T11:45:09Z",
+             "content": "{{ CHECKPOINT 0 }} summary of truncated context"},
+        ]
+
+    def test_antigravity_dialogue_and_labels(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+            for o in self.lines():
+                fh.write(json.dumps(o) + "\n")
+            path = fh.name
+        out = io.StringIO()
+        rendered = io.StringIO()
+        try:
+            code = rnd.preview(path, out, turns_for=rnd.iter_antigravity_turns)
+            rnd.render(path, rendered, turns_for=rnd.iter_antigravity_turns)
+        finally:
+            os.unlink(path)
+        self.assertEqual(code, 0)
+        turns = json.loads(out.getvalue())["turns"]
+        self.assertEqual([(t["who"], t["text"]) for t in turns],
+                         [("you", "gemini testing session"),
+                          ("antigravity", "Ready! How can I help?")])
+        self.assertEqual(turns[0]["time"], "2026-08-16 11:45")
+        self.assertIn("───── ANTIGRAVITY", rendered.getvalue())
+        self.assertNotIn("CHECKPOINT", rendered.getvalue())
+        self.assertNotIn("ADDITIONAL_METADATA", rendered.getvalue())
+
+
+class TestOpencodeTurns(unittest.TestCase):
+    def make_db(self, path):
+        db = sqlite3.connect(path)
+        db.executescript(
+            "CREATE TABLE message (id TEXT, session_id TEXT,"
+            " time_created INTEGER, data TEXT);"
+            "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT,"
+            " time_created INTEGER, data TEXT);")
+        rows = [
+            ("m1", "ses_1", 1786875810000, {"role": "user"},
+             [{"type": "text", "text": "<system-reminder>ctx", "synthetic": True},
+              {"type": "text", "text": "real question"}]),
+            ("m2", "ses_1", 1786875820000, {"role": "assistant"},
+             [{"type": "step-start"}, {"type": "reasoning", "text": "hmm"},
+              {"type": "text", "text": "the answer"}]),
+            ("m3", "ses_other", 1786875830000, {"role": "user"},
+             [{"type": "text", "text": "another session"}]),
+        ]
+        for mid, sid, ts, meta, parts in rows:
+            db.execute("INSERT INTO message VALUES (?,?,?,?)",
+                       (mid, sid, ts, json.dumps(meta)))
+            for n, part in enumerate(parts):
+                db.execute("INSERT INTO part VALUES (?,?,?,?,?)",
+                           ("%s-p%d" % (mid, n), mid, sid, ts + n, json.dumps(part)))
+        db.commit()
+        db.close()
+
+    def test_opencode_dialogue_labels_and_session_filter(self):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as fh:
+            path = fh.name
+        os.unlink(path)
+        self.make_db(path)
+        out = io.StringIO()
+        rendered = io.StringIO()
+        reader = lambda p: rnd.iter_opencode_turns(p, "ses_1")
+        try:
+            code = rnd.preview(path, out, turns_for=reader)
+            rnd.render(path, rendered, turns_for=reader)
+        finally:
+            os.unlink(path)
+        self.assertEqual(code, 0)
+        turns = json.loads(out.getvalue())["turns"]
+        self.assertEqual([(t["who"], t["text"]) for t in turns],
+                         [("you", "real question"), ("opencode", "the answer")])
+        self.assertEqual(turns[0]["time"], "2026-08-16 10:23")
+        self.assertIn("───── OPENCODE", rendered.getvalue())
+        self.assertNotIn("another session", rendered.getvalue())
+        self.assertNotIn("<system-reminder>", rendered.getvalue())
+
+    def test_missing_db_fails_gracefully(self):
+        reader = lambda p: rnd.iter_opencode_turns(p, "ses_1")
+        self.assertEqual(
+            rnd.preview("/nonexistent/opencode.db", io.StringIO(), turns_for=reader), 1)
 
 
 def skill_json(text):

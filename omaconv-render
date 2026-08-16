@@ -10,16 +10,22 @@ Default: the full dialogue on stdout (used by omaconv-grep).
 pane (its list view only instantiates the visible rows).
 --skill: a SKILL.md split into frontmatter and body, as JSON, for the
 skills preview pane.
---agent <name>: transcript format (claude by default, or codex).
+--agent <name>: transcript format (claude by default, codex, opencode,
+antigravity or pi).
+--session <id>: which session to read (opencode only — its <file> is the
+shared SQLite db, not a per-session transcript).
 """
 
 import json
+import sqlite3
 import sys
+from datetime import datetime, timezone
 
 NOISE_PREFIXES = ("<command-", "<local-command", "Caveat:", "<system-reminder",
                   "<task-notification", "[Request interrupted")
 CODEX_NOISE = ("<environment_context", "<turn_aborted", "<user_instructions",
                "# Context from my IDE")
+OPENCODE_NOISE = ("<system-reminder",)
 # Safety cap only: above the longest real turn observed (28k chars), so
 # messages are never visibly truncated — it just bounds pathological pastes.
 PREVIEW_CLIP = 32000
@@ -98,7 +104,139 @@ def iter_codex_turns(path):
                    "text": "\n".join(p.rstrip() for p in parts)}
 
 
-TURN_READERS = {"claude": iter_turns, "codex": iter_codex_turns}
+def iter_pi_turns(path):
+    """Same shape, for Pi session files: message lines with
+    message.role user/assistant, text items only. Slash commands (/exit,
+    /model …) are logged as user messages — machinery, not dialogue."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict) or obj.get("type") != "message":
+                continue
+            message = obj.get("message")
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            parts = []
+            for item in message.get("content") or []:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text)
+            text = "\n".join(p.rstrip() for p in parts)
+            if not text or (role == "user" and text.lstrip().startswith("/")):
+                continue
+            stamp = obj.get("timestamp")
+            when = stamp[:16].replace("T", " ") if isinstance(stamp, str) else ""
+            yield {"who": "you" if role == "user" else "pi",
+                   "time": when, "text": text}
+
+
+def antigravity_user_text(content):
+    """Unwrap <USER_REQUEST>…</USER_REQUEST>; the rest of the step is
+    injected metadata, not something she typed."""
+    if not isinstance(content, str):
+        return None
+    start = content.find("<USER_REQUEST>")
+    if start == -1:
+        return None
+    end = content.find("</USER_REQUEST>", start)
+    if end == -1:
+        return None
+    text = content[start + len("<USER_REQUEST>"):end].strip()
+    return text or None
+
+
+def iter_antigravity_turns(path):
+    """Same shape, for Antigravity CLI brain transcripts: step lines with
+    {source, type, content}. Dialogue = explicit user inputs and model
+    planner responses; checkpoints and history summaries are machinery."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            source, kind = obj.get("source"), obj.get("type")
+            if kind == "USER_INPUT" and source == "USER_EXPLICIT":
+                who, text = "you", antigravity_user_text(obj.get("content"))
+            elif kind == "PLANNER_RESPONSE" and source == "MODEL":
+                text = obj.get("content")
+                who = "antigravity"
+                if not isinstance(text, str) or not text.strip():
+                    text = None
+            else:
+                continue
+            if not text:
+                continue
+            stamp = obj.get("created_at")
+            when = stamp[:16].replace("T", " ") if isinstance(stamp, str) else ""
+            yield {"who": who, "time": when, "text": text.rstrip()}
+
+
+def iter_opencode_turns(path, session_id):
+    """Same shape, from OpenCode's SQLite store: one turn per message,
+    joining its text parts. `synthetic` parts are injected context, not
+    dialogue. sqlite errors surface as OSError so render/preview handle
+    every agent the same way."""
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    except sqlite3.Error as e:
+        raise OSError(str(e))
+    try:
+        messages = db.execute(
+            "SELECT id, data, time_created FROM message"
+            " WHERE session_id = ? ORDER BY time_created", (session_id,)).fetchall()
+        parts = db.execute(
+            "SELECT message_id, data FROM part"
+            " WHERE session_id = ? ORDER BY time_created", (session_id,)).fetchall()
+    except sqlite3.Error as e:
+        raise OSError(str(e))
+    finally:
+        db.close()
+
+    texts = {}
+    for mid, raw in parts:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or data.get("type") != "text" \
+                or data.get("synthetic"):
+            continue
+        text = data.get("text")
+        if isinstance(text, str) and text.strip() \
+                and not text.lstrip().startswith(OPENCODE_NOISE):
+            texts.setdefault(mid, []).append(text)
+
+    for mid, raw, created in messages:
+        try:
+            meta = json.loads(raw)
+        except ValueError:
+            continue
+        role = meta.get("role") if isinstance(meta, dict) else None
+        if role not in ("user", "assistant") or mid not in texts:
+            continue
+        when = datetime.fromtimestamp(
+            (created or 0) / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        yield {"who": "you" if role == "user" else "opencode",
+               "time": when,
+               "text": "\n".join(t.rstrip() for t in texts[mid])}
+
+
+TURN_READERS = {"claude": iter_turns, "codex": iter_codex_turns,
+                "opencode": iter_opencode_turns,
+                "antigravity": iter_antigravity_turns,
+                "pi": iter_pi_turns}
+# Readers whose source is a shared store: they need the session id too.
+NEEDS_SESSION = ("opencode",)
 
 
 def clip(text, limit):
@@ -158,36 +296,50 @@ def skill_preview(path, out, clip_chars=PREVIEW_CLIP):
 
 
 def usage():
-    print("usage: omaconv-render [--preview | --skill] [--agent NAME] <file>",
-          file=sys.stderr)
+    print("usage: omaconv-render [--preview | --skill] [--agent NAME]"
+          " [--session ID] <file>", file=sys.stderr)
     return 2
 
 
-def main(argv):
-    args = argv[1:]
+def _parse_args(args):
+    """(mode, options{agent, session}, paths) or None on a bad command line."""
     mode = None
-    agent = "claude"
+    opts = {"agent": "claude", "session": None}
     paths = []
     i = 0
     while i < len(args):
         arg = args[i]
         if arg in ("--preview", "--skill"):
             if mode:
-                return usage()
+                return None
             mode = arg
-        elif arg == "--agent":
+        elif arg in ("--agent", "--session"):
             i += 1
             if i >= len(args):
-                return usage()
-            agent = args[i]
+                return None
+            opts[arg[2:]] = args[i]
         elif arg.startswith("--"):
-            return usage()
+            return None
         else:
             paths.append(arg)
         i += 1
+    return mode, opts, paths
+
+
+def main(argv):
+    parsed = _parse_args(argv[1:])
+    if parsed is None:
+        return usage()
+    mode, opts, paths = parsed
+    agent, session = opts["agent"], opts["session"]
     if len(paths) != 1 or agent not in TURN_READERS:
         return usage()
     turns_for = TURN_READERS[agent]
+    if agent in NEEDS_SESSION:
+        if not session:
+            return usage()
+        reader = turns_for
+        turns_for = lambda p: reader(p, session)
     if mode == "--skill":
         return skill_preview(paths[0], sys.stdout)
     if mode == "--preview":

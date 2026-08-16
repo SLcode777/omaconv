@@ -2,12 +2,14 @@
 # Search inside a transcript, rendered as readable dialogue first
 # (omaconv-render), then browsed with the ugrep interactive TUI when
 # available, plain less otherwise. $1 = initial pattern (may be empty),
-# $2 = transcript path, $3 = agent (claude by default). Args are
+# $2 = transcript path, $3 = agent (claude by default), $4 = session id
+# (only for agents whose store is a shared db, e.g. opencode). Args are
 # positional, never interpolated.
 
 pattern="$1"
 file="$2"
 agent="${3:-claude}"
+session="$4"
 [ -f "$file" ] || exit 1
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -16,7 +18,11 @@ trap 'rm -f "$tmp"' EXIT INT TERM
 
 # The rendered text holds conversation content: runtime dir is user-only,
 # and the file is removed when the pager exits.
-python3 "$here/omaconv-render" --agent "$agent" "$file" > "$tmp" || exit 1
+if [ -n "$session" ]; then
+  python3 "$here/omaconv-render" --agent "$agent" --session "$session" "$file" > "$tmp" || exit 1
+else
+  python3 "$here/omaconv-render" --agent "$agent" "$file" > "$tmp" || exit 1
+fi
 
 if command -v ugrep >/dev/null 2>&1; then
   if [ -n "$pattern" ]; then

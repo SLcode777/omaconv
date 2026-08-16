@@ -29,6 +29,23 @@ case "$agent" in
   codex)
     codex resume "$id"
     ;;
+  opencode)
+    if [ -n "$fork" ]; then
+      opencode --session "$id" --fork
+    else
+      opencode --session "$id"
+    fi
+    ;;
+  antigravity)
+    agy --conversation "$id"
+    ;;
+  pi)
+    if [ -n "$fork" ]; then
+      pi --fork "$id"
+    else
+      pi --session "$id"
+    fi
+    ;;
   *)
     if [ -n "$fork" ]; then
       claude --resume "$id" --fork-session

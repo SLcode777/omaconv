@@ -223,9 +223,12 @@ function shellQuote(text) {
 }
 
 function resumeCommand(cwd, id, agent) {
-  var invoke = agent === "codex"
-    ? "codex resume " + shellQuote(id)
-    : "claude --resume " + shellQuote(id)
+  var invoke
+  if (agent === "codex") invoke = "codex resume " + shellQuote(id)
+  else if (agent === "opencode") invoke = "opencode --session " + shellQuote(id)
+  else if (agent === "antigravity") invoke = "agy --conversation " + shellQuote(id)
+  else if (agent === "pi") invoke = "pi --session " + shellQuote(id)
+  else invoke = "claude --resume " + shellQuote(id)
   return "cd " + shellQuote(cwd) + " && " + invoke
 }
 
