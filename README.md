@@ -10,14 +10,14 @@ machine, finds them by searching their title, their directory **and
 everything you actually typed in them**, and resumes any of them in one
 keystroke — always in the right working directory.
 
-![Omaconv screenshot](preview.png)
+![Omaconv screenshot](assets/preview1.webp)
 
 ## Why
 
-Claude Code stores transcripts under `~/.claude/projects/<encoded-path>/`. To
+AI agents stores transcripts under `~/.agent/projects/<encoded-path>/`. To
 resume a conversation you normally have to remember which directory it was
-started from, `cd` there, and scroll through `claude --resume`. A conversation
-whose directory you forgot is, in practice, lost. Omaconv fixes that: one
+started from, `cd` there, and scroll through the resume list. A conversation
+whose directory you forgot is not easy to find. Omaconv fixes that: one
 palette, fuzzy search over titles, paths and your own prompts, and a resume
 that always lands in the conversation's original `cwd`.
 
@@ -35,46 +35,44 @@ omarchy-shell shell toggle slcode777.omaconv
 
 ## Use
 
-Open the palette and just type — the search line is the input. The empty
-palette shows your pinned conversations, then the 10 most recent grouped by
-date (TODAY / YESTERDAY / THIS WEEK / OLDER). A result matched through a
-prompt shows the matching excerpt with the term highlighted, so you always
-know why a row is there. The right pane previews the selected conversation
-as a readable YOU/CLAUDE dialogue — opened on the latest exchange, and
-scrollable all the way back to the first one.
+Open the palette and just type, the search line is the input. 
+
+With an empty input, the palette shows your pinned conversations, then the 
+10 most recent ones. A result matched through a search shows the matching
+excerpt with the term highlighted, so you always know why a row is there. 
+The right pane previews the selected conversation as a readable YOU/AGENT
+dialogue.
+
+typing an agent's name filters to it. Features an agent cannot support are
+greyed out instead of silently broken — Codex has no rename or fork;
+OpenCode forks fine but keeps all sessions in one shared database, so
+rename and delete dim rather than risk it; Antigravity resumes and previews
+only; Pi forks and deletes but has no rename. A resumed session keeps
+exactly the permission mode you left it with: Omaconv never injects
+permission-bypass flags.
 
 | Key      | Action                                                        |
 | -------- | ------------------------------------------------------------- |
 | `↵`      | Resume in the conversation's directory                        |
 | `Alt+↵`  | Resume as a fork — new session, same context, original intact |
-| `Ctrl+↵` | Copy the `cd … && claude --resume …` command                  |
+| `Ctrl+↵` | Copy the `cd … && <agent> --resume …` command                 |
 | `Ctrl+P` | Pin / unpin                                                   |
 | `Ctrl+R` | Rename (shows in Claude Code's own picker too)                |
 | `Ctrl+O` | Open a terminal in the conversation's directory               |
 | `Ctrl+T` | Reveal the transcript in the file manager                     |
 | `Ctrl+G` | Search the full transcript, rendered as a readable dialogue   |
-| `Ctrl+D` | Delete — to the trash, after confirmation                     |
+| `Ctrl+D` | Delete (to the trash)                                         |
 | `Ctrl+K` | All shortcuts                                                 |
 | `Esc`    | Clear the search, then close                                  |
 
-Type `/` as the first character to switch to the **skills** namespace: it
-lists the skills installed in `~/.claude/skills/`, searchable by name and
+Type `/` as the first character to switch to the CLAUDE **skills** namespace:
+it lists the skills installed in `~/.claude/skills/`, searchable by name and
 description. `↵` opens the skill's `SKILL.md`, `Ctrl+↵` copies `/name`.
 
 Conversations whose directory no longer exists fall back to the most recent
 directory that still does (marked `↪`), or are greyed out when none survives.
 Conversations currently running as a background agent show a `● live` badge;
 resuming one opens `claude agents` so you can attach instead.
-
-Codex, OpenCode, Antigravity CLI and Pi sessions are indexed alongside
-Claude's, with the same full-text search over your prompts, and carry an
-agent badge; typing an agent's name filters to it. Features an agent cannot
-support are greyed out instead of silently broken — Codex has no rename or
-fork; OpenCode forks fine but keeps all sessions in one shared database, so
-rename and delete dim rather than risk it; Antigravity resumes and previews
-only; Pi forks and deletes but has no rename. A resumed session keeps
-exactly the permission mode you left it with: Omaconv never injects
-permission-bypass flags.
 
 ## How it works
 
@@ -85,6 +83,16 @@ incremental reindex runs in the background — no daemon, no timers. Search is
 pure in-memory JavaScript: accent- and case-insensitive, literal matching
 over titles, paths and user prompts, ~0.5 ms per keystroke over a hundred
 conversations.
+
+## See more previews
+
+![Omaconv screenshot](assets/preview4.webp)
+![Omaconv screenshot](assets/preview5.webp)
+![Omaconv screenshot](assets/preview7.webp)
+![Omaconv screenshot](assets/preview6.webp)
+![Omaconv screenshot](assets/preview2.webp)
+![Omaconv screenshot](assets/preview3.webp)
+
 
 ## Privacy & security
 
@@ -101,9 +109,9 @@ conversations.
 
 ## Requirements
 
-- Omarchy with the Quickshell shell (plugin API v1)
+- Omarchy with the Quickshell shell
 - `python3` (standard library only)
-- `claude` on the `PATH` (and `codex` / `opencode` / `agy` / `pi` to resume
+- `claude` on the `PATH` (and/or `codex` / `opencode` / `agy` / `pi` to resume
   their sessions)
 
 Optional: `ugrep` (`omarchy pkg add ugrep`) upgrades `Ctrl+G` from a pager to
