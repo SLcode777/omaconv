@@ -116,25 +116,36 @@ Item {
   // tracks what the pane currently shows, so re-selecting the same row
   // (or an index reload) doesn't re-render.
   property var previewTurns: []
+  property var previewSkillDoc: null
   property bool previewLoading: false
   property string previewSessionId: ""
   property string previewPendingId: ""
 
   onSelectedSessionChanged: root.requestPreview()
+  onSelectedSkillChanged: root.requestPreview()
+
+  // What the pane should show: the session id, or the skill's SKILL.md
+  // path in the skills namespace. Empty → nothing previewable.
+  function previewTargetId() {
+    if (root.selectedSession) return root.selectedSession.transcriptPath ? root.selectedSession.id : ""
+    return (root.selectedSkill && root.selectedSkill.path) ? root.selectedSkill.path : ""
+  }
 
   function requestPreview() {
-    var s = root.selectedSession
-    if (!root.widePreview || !s || !s.transcriptPath) {
+    var id = root.previewTargetId()
+    if (!root.widePreview || !id) {
       previewTimer.stop()
       previewProc.running = false
       root.previewTurns = []
+      root.previewSkillDoc = null
       root.previewSessionId = ""
       root.previewLoading = false
       return
     }
-    if (s.id === root.previewSessionId) return
+    if (id === root.previewSessionId) return
     previewProc.running = false
     root.previewTurns = []
+    root.previewSkillDoc = null
     root.previewLoading = true
     previewTimer.restart()
   }
@@ -142,15 +153,16 @@ Item {
   function applyPreview(raw) {
     // A run killed by a newer selection can still flush its collector:
     // only the run matching the current selection may touch the pane.
-    var s = root.selectedSession
-    if (!s || s.id !== root.previewPendingId) return
+    if (root.previewTargetId() !== root.previewPendingId) return
     root.previewLoading = false
     var parsed = null
     try { parsed = JSON.parse(raw) } catch (e) {
       console.warn("omaconv: unreadable preview:", e)
     }
     root.previewTurns = (parsed && Array.isArray(parsed.turns)) ? parsed.turns : []
+    root.previewSkillDoc = (parsed && parsed.skill) ? parsed.skill : null
     root.previewSessionId = root.previewPendingId
+    skillFlick.contentY = 0
   }
 
   function open(payloadJson) {
@@ -482,9 +494,16 @@ Item {
     repeat: false
     onTriggered: {
       var s = root.selectedSession
-      if (!s || !s.transcriptPath) return
-      root.previewPendingId = s.id
-      previewProc.command = ["python3", root.rendererPath, "--preview", s.transcriptPath]
+      var k = root.selectedSkill
+      if (s && s.transcriptPath) {
+        root.previewPendingId = s.id
+        previewProc.command = ["python3", root.rendererPath, "--preview", s.transcriptPath]
+      } else if (k && k.path) {
+        root.previewPendingId = k.path
+        previewProc.command = ["python3", root.rendererPath, "--skill", k.path]
+      } else {
+        return
+      }
       previewProc.running = true
     }
   }
@@ -496,8 +515,7 @@ Item {
       onStreamFinished: root.applyPreview(text)
     }
     onExited: function(exitCode, exitStatus) {
-      if (exitCode !== 0 && root.selectedSession
-          && root.selectedSession.id === root.previewPendingId)
+      if (exitCode !== 0 && root.previewTargetId() === root.previewPendingId)
         root.previewLoading = false
     }
   }
@@ -1123,53 +1141,104 @@ Item {
               font.pixelSize: Style.font.body
             }
 
+            // Skills namespace: same shape as the conversation preview —
+            // fixed header (name, description, dir, actions), scrollable
+            // SKILL.md below (frontmatter, then body).
             Column {
+              id: skillHeader
               visible: root.selectedSkill !== null
-              anchors.fill: parent
-              spacing: Style.spacing.sm
+              height: visible ? implicitHeight : 0
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              spacing: Style.space(12)
 
               Text {
                 width: parent.width
-                text: "LOCATION"
-                color: root.selectedText
-                opacity: 0.7
+                text: root.selectedSkill ? "/" + root.selectedSkill.name : ""
+                color: root.foreground
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.letterSpacing: 2
+                font.pixelSize: Style.font.heading
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                visible: !!(root.selectedSkill && root.selectedSkill.description)
+                text: root.selectedSkill ? (root.selectedSkill.description || "") : ""
+                color: root.foreground
+                opacity: 0.75
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.Wrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
               }
 
               Text {
                 width: parent.width
                 text: root.selectedSkill ? root.homeAbbrev(root.selectedSkill.dir) : ""
                 color: root.foreground
-                opacity: 0.75
+                opacity: 0.58
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
-                wrapMode: Text.WrapAnywhere
-                maximumLineCount: 2
                 elide: Text.ElideRight
               }
 
-              Text {
+              Flow {
                 width: parent.width
-                text: "DESCRIPTION"
-                color: root.selectedText
-                opacity: 0.7
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.letterSpacing: 2
+                spacing: Style.spacing.sm
+
+                PaneButton {
+                  icon: ""
+                  label: "OPEN"
+                  enabled: !!(root.selectedSkill && root.selectedSkill.path)
+                  onActivated: root.openSkill(root.selectedIndex)
+                }
+
+                PaneButton {
+                  icon: ""
+                  label: "COPY NAME"
+                  enabled: root.selectedSkill !== null
+                  onActivated: root.copySkillName(root.selectedIndex)
+                }
               }
 
-              Text {
+              Rectangle {
                 width: parent.width
-                text: root.selectedSkill ? (root.selectedSkill.description || "—") : ""
+                height: 1
                 color: root.foreground
-                opacity: 0.75
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: Text.Wrap
-                maximumLineCount: 16
-                elide: Text.ElideRight
+                opacity: 0.12
+              }
+            }
+
+            Flickable {
+              id: skillFlick
+              visible: root.selectedSkill !== null
+              anchors.top: skillHeader.bottom
+              anchors.topMargin: skillHeader.visible ? Style.spacing.md : 0
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              clip: true
+              contentHeight: skillDoc.height
+              boundsBehavior: Flickable.StopAtBounds
+
+              Column {
+                id: skillDoc
+                width: skillFlick.width
+
+                // The frontmatter is already distilled into the header
+                // (name, description): only the body is worth reading.
+                Text {
+                  width: parent.width
+                  text: root.previewSkillDoc ? (root.previewSkillDoc.body || "") : ""
+                  color: root.foreground
+                  opacity: 0.75
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  wrapMode: Text.Wrap
+                }
               }
             }
           }

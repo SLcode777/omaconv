@@ -115,5 +115,40 @@ class TestPreview(unittest.TestCase):
         self.assertEqual(rnd.preview("/nonexistent/x.jsonl", io.StringIO()), 1)
 
 
+def skill_json(text):
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+        fh.write(text)
+        path = fh.name
+    out = io.StringIO()
+    try:
+        code = rnd.skill_preview(path, out)
+    finally:
+        os.unlink(path)
+    return code, json.loads(out.getvalue()) if code == 0 else None
+
+
+class TestSkillPreview(unittest.TestCase):
+    def test_frontmatter_and_body_split(self):
+        code, data = skill_json("---\nname: demo\ndescription: a demo\n---\n\n# Title\n\nBody text.\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(data["skill"]["frontmatter"], "name: demo\ndescription: a demo")
+        self.assertEqual(data["skill"]["body"], "# Title\n\nBody text.")
+
+    def test_no_frontmatter_is_all_body(self):
+        code, data = skill_json("# Just a doc\n\nNo frontmatter here.\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(data["skill"]["frontmatter"], "")
+        self.assertEqual(data["skill"]["body"], "# Just a doc\n\nNo frontmatter here.")
+
+    def test_unclosed_frontmatter_is_body(self):
+        code, data = skill_json("---\nname: broken\nno closing fence\n")
+        self.assertEqual(code, 0)
+        self.assertEqual(data["skill"]["frontmatter"], "")
+        self.assertIn("name: broken", data["skill"]["body"])
+
+    def test_missing_file_fails_gracefully(self):
+        self.assertEqual(rnd.skill_preview("/nonexistent/SKILL.md", io.StringIO()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

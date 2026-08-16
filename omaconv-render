@@ -8,6 +8,8 @@ and are dropped. Tolerant parsing, stdlib only (PRD §9).
 Default: the full dialogue on stdout (used by omaconv-grep).
 --preview: every turn as JSON, each clipped, for the palette's preview
 pane (its list view only instantiates the visible rows).
+--skill: a SKILL.md split into frontmatter and body, as JSON, for the
+skills preview pane.
 """
 
 import json
@@ -93,14 +95,39 @@ def preview(path, out, clip_chars=PREVIEW_CLIP):
     return 0
 
 
+def skill_preview(path, out, clip_chars=PREVIEW_CLIP):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as e:
+        print("omaconv-render: " + str(e), file=sys.stderr)
+        return 1
+    lines = text.splitlines()
+    front, body_start = [], 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                front = lines[1:i]
+                body_start = i + 1
+                break
+    payload = {"skill": {
+        "frontmatter": clip("\n".join(front), clip_chars),
+        "body": clip("\n".join(lines[body_start:]).strip("\n"), clip_chars)}}
+    json.dump(payload, out, ensure_ascii=False)
+    out.write("\n")
+    return 0
+
+
 def main(argv):
     args = argv[1:]
-    as_preview = "--preview" in args
-    paths = [a for a in args if a != "--preview"]
-    if len(paths) != 1:
-        print("usage: omaconv-render [--preview] <transcript.jsonl>", file=sys.stderr)
+    flags = {a for a in args if a.startswith("--")}
+    paths = [a for a in args if not a.startswith("--")]
+    if len(paths) != 1 or not flags <= {"--preview", "--skill"} or len(flags) > 1:
+        print("usage: omaconv-render [--preview | --skill] <file>", file=sys.stderr)
         return 2
-    if as_preview:
+    if "--skill" in flags:
+        return skill_preview(paths[0], sys.stdout)
+    if "--preview" in flags:
         return preview(paths[0], sys.stdout)
     return render(paths[0], sys.stdout)
 
