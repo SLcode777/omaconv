@@ -66,5 +66,54 @@ class TestRender(unittest.TestCase):
         self.assertEqual(rnd.render("/nonexistent/x.jsonl", out), 1)
 
 
+def preview_json(objs, **kwargs):
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        for o in objs:
+            fh.write(json.dumps(o) + "\n")
+        path = fh.name
+    out = io.StringIO()
+    try:
+        code = rnd.preview(path, out, **kwargs)
+    finally:
+        os.unlink(path)
+    return code, json.loads(out.getvalue()) if code == 0 else None
+
+
+class TestPreview(unittest.TestCase):
+    def turns(self, n):
+        out = []
+        for i in range(n):
+            out.append({"type": "user", "timestamp": "2026-08-15T10:%02d:00Z" % i,
+                        "message": {"content": "question %d" % i}})
+            out.append({"type": "assistant",
+                        "message": {"content": [{"type": "text", "text": "answer %d" % i}]}})
+        return out
+
+    def test_all_turns_kept_in_order(self):
+        code, data = preview_json(self.turns(3))
+        self.assertEqual(code, 0)
+        texts = [t["text"] for t in data["turns"]]
+        self.assertEqual(texts, ["question 0", "answer 0", "question 1",
+                                 "answer 1", "question 2", "answer 2"])
+        self.assertEqual(data["turns"][0]["who"], "you")
+        self.assertEqual(data["turns"][1]["who"], "claude")
+        self.assertEqual(data["turns"][0]["time"], "2026-08-15 10:00")
+
+    def test_long_turns_are_clipped(self):
+        code, data = preview_json([
+            {"type": "user", "message": {"content": "x" * 900}}], clip_chars=100)
+        self.assertEqual(code, 0)
+        text = data["turns"][0]["text"]
+        self.assertEqual(len(text), 100)
+        self.assertTrue(text.endswith("…"))
+
+    def test_noise_excluded_and_missing_file_fails(self):
+        code, data = preview_json([
+            {"type": "user", "message": {"content": "<command-name>/model</command-name>"}}])
+        self.assertEqual(code, 0)
+        self.assertEqual(data["turns"], [])
+        self.assertEqual(rnd.preview("/nonexistent/x.jsonl", io.StringIO()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,6 +39,7 @@ Item {
   readonly property string grepperPath: pluginFile("omaconv-grep")
   readonly property string titlerPath: pluginFile("omaconv-set-title")
   readonly property string resumerPath: pluginFile("omaconv-resume")
+  readonly property string rendererPath: pluginFile("omaconv-render")
 
   // Delete confirmation modal: Ctrl+D stores the target here, ↵ (or
   // Ctrl+D again) confirms, esc cancels.
@@ -83,12 +84,14 @@ Item {
   // screen, wide margins, roomy rows.
   property int contentMargin: Style.space(28)
   // Preview (PRD F4): side pane when the screen is wide enough, otherwise
-  // two extra lines under the selected row.
+  // two extra lines under the selected row. The wide pane shows the last
+  // turns of the conversation, rendered by omaconv-render --preview.
   readonly property bool widePreview: panel.width >= Style.space(1000)
-  property int previewWidth: Style.space(340)
+  // Gutter between the list and the preview pane, hairline in the middle.
+  readonly property int previewGap: Style.space(48)
   property int cardWidth: Math.min(
-    Math.max(Style.space(680), Math.round(panel.width * (widePreview ? 0.66 : 0.55))),
-    panel.width - Style.gapsOut * 2, Style.space(1180))
+    Math.max(Style.space(680), Math.round(panel.width * (widePreview ? 0.72 : 0.55))),
+    panel.width - Style.gapsOut * 2, Style.space(1320))
   property int cardHeight: Math.min(
     Math.max(Style.space(480), Math.round(panel.height * 0.68)),
     panel.height - Style.gapsOut * 2)
@@ -104,6 +107,48 @@ Item {
   readonly property string previewLast: (selectedSession && Array.isArray(selectedSession.prompts)
     && selectedSession.prompts.length > 1)
     ? selectedSession.prompts[selectedSession.prompts.length - 1] : ""
+
+  // Wide-pane dialogue preview: last turns of the selected transcript,
+  // fetched by a debounced omaconv-render --preview run. previewSessionId
+  // tracks what the pane currently shows, so re-selecting the same row
+  // (or an index reload) doesn't re-render.
+  property var previewTurns: []
+  property bool previewLoading: false
+  property string previewSessionId: ""
+  property string previewPendingId: ""
+
+  onSelectedSessionChanged: root.requestPreview()
+
+  function requestPreview() {
+    var s = root.selectedSession
+    if (!root.widePreview || !s || !s.transcriptPath) {
+      previewTimer.stop()
+      previewProc.running = false
+      root.previewTurns = []
+      root.previewSessionId = ""
+      root.previewLoading = false
+      return
+    }
+    if (s.id === root.previewSessionId) return
+    previewProc.running = false
+    root.previewTurns = []
+    root.previewLoading = true
+    previewTimer.restart()
+  }
+
+  function applyPreview(raw) {
+    // A run killed by a newer selection can still flush its collector:
+    // only the run matching the current selection may touch the pane.
+    var s = root.selectedSession
+    if (!s || s.id !== root.previewPendingId) return
+    root.previewLoading = false
+    var parsed = null
+    try { parsed = JSON.parse(raw) } catch (e) {
+      console.warn("omaconv: unreadable preview:", e)
+    }
+    root.previewTurns = (parsed && Array.isArray(parsed.turns)) ? parsed.turns : []
+    root.previewSessionId = root.previewPendingId
+  }
 
   function open(payloadJson) {
     root.opened = true
@@ -421,6 +466,33 @@ Item {
     onExited: indexFile.reload()
   }
 
+  // Debounce so arrow-key travel doesn't spawn one render per row.
+  Timer {
+    id: previewTimer
+    interval: 90
+    repeat: false
+    onTriggered: {
+      var s = root.selectedSession
+      if (!s || !s.transcriptPath) return
+      root.previewPendingId = s.id
+      previewProc.command = ["python3", root.rendererPath, "--preview", s.transcriptPath]
+      previewProc.running = true
+    }
+  }
+
+  Process {
+    id: previewProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPreview(text)
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0 && root.selectedSession
+          && root.selectedSession.id === root.previewPendingId)
+        root.previewLoading = false
+    }
+  }
+
   // Mutations (trash, rename) run sequentially through a small queue:
   // setting running=true on a live Process is a no-op, so back-to-back
   // operations would otherwise drop the second one on a slow filesystem.
@@ -669,7 +741,9 @@ Item {
             anchors.left: parent.left
             anchors.top: parent.top
             anchors.bottom: parent.bottom
-            width: root.widePreview ? parent.width - root.previewWidth - Style.spacing.lg : parent.width
+            // Roughly 50/50 with the preview pane when it is visible.
+            width: root.widePreview
+              ? Math.round((parent.width - root.previewGap) * 0.5) : parent.width
             model: root.results
             clip: true
             spacing: Style.space(4)
@@ -831,119 +905,259 @@ Item {
             }
           }
 
-          // Side preview (PRD F4): first prompt + latest prompt of the
-          // selection — enough to recognize a conversation without any LLM.
-          Column {
+          // Vertical hairline in the middle of the gutter.
+          Rectangle {
             visible: root.widePreview
-            width: root.previewWidth
+            width: 1
+            anchors.left: resultList.right
+            anchors.leftMargin: Math.round(root.previewGap / 2)
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            color: root.foreground
+            opacity: 0.12
+          }
+
+          // Side preview (PRD F4): a fixed header (title, metas, actions)
+          // over the YOU/CLAUDE dialogue of the whole conversation.
+          Item {
+            visible: root.widePreview
+            width: parent.width - resultList.width - root.previewGap
             anchors.right: parent.right
             anchors.top: parent.top
-            spacing: Style.spacing.sm
+            anchors.bottom: parent.bottom
+
+            // Square bordered action button, esc-badge styling. The icon
+            // is a Nerd Font glyph — the shell's monospace font ships them.
+            component PaneButton: Rectangle {
+              id: btn
+              property string icon: ""
+              property string label: ""
+              signal activated()
+              width: btnText.width + Style.space(20)
+              height: btnText.height + Style.space(10)
+              radius: 0
+              color: btn.enabled && btnMouse.containsMouse
+                ? root.selectedBackground : "transparent"
+              border.color: root.foreground
+              border.width: 1
+              opacity: btn.enabled ? (btnMouse.containsMouse ? 0.9 : 0.55) : 0.25
+
+              Text {
+                id: btnText
+                anchors.centerIn: parent
+                text: (btn.icon ? btn.icon + " " : "") + btn.label
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.letterSpacing: 1
+              }
+
+              MouseArea {
+                id: btnMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: btn.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: btn.activated()
+              }
+            }
+
+            Column {
+              id: previewHeader
+              visible: root.selectedSkill === null && root.selectedSession !== null
+              height: visible ? implicitHeight : 0
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              spacing: Style.space(12)
+
+              Text {
+                width: parent.width
+                text: root.selectedSession
+                  ? (root.selectedSession.title || root.selectedSession.id) : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.heading
+                wrapMode: Text.Wrap
+                maximumLineCount: 2
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                text: root.selectedSession ? root.subtitleFor(root.selectedSession) : ""
+                color: root.foreground
+                opacity: 0.58
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+              }
+
+              // Every conversation action, mirrored from the shortcuts —
+              // Flow wraps them onto extra lines when the pane is narrow.
+              Flow {
+                width: parent.width
+                spacing: Style.spacing.sm
+
+                PaneButton {
+                  icon: ""
+                  label: "RESUME"
+                  enabled: !!(root.selectedSession && root.selectedSession.resumeCwd)
+                  onActivated: root.resumeIndex(root.selectedIndex, false)
+                }
+
+                PaneButton {
+                  icon: ""
+                  label: "FORK"
+                  enabled: !!(root.selectedSession && root.selectedSession.resumeCwd)
+                  onActivated: root.resumeIndex(root.selectedIndex, true)
+                }
+
+                PaneButton {
+                  icon: ""
+                  label: "COPY CMD"
+                  enabled: !!(root.selectedSession
+                    && (root.selectedSession.resumeCwd || root.selectedSession.cwd))
+                  onActivated: root.copyCommand(root.selectedIndex)
+                }
+
+                PaneButton {
+                  icon: ""
+                  label: (root.selectedSession && (root.prefs.pinned || [])
+                    .indexOf(root.selectedSession.id) !== -1) ? "UNPIN" : "PIN"
+                  enabled: root.selectedSession !== null
+                  onActivated: root.togglePin(root.selectedIndex)
+                }
+
+                PaneButton {
+                  icon: ""
+                  label: "RENAME"
+                  enabled: !!(root.selectedSession && root.selectedSession.transcriptPath)
+                  onActivated: root.startRename(root.selectedIndex)
+                }
+
+                PaneButton {
+                  icon: ""
+                  label: "DELETE"
+                  enabled: !!(root.selectedSession && root.selectedSession.transcriptPath)
+                  onActivated: root.requestDelete(root.selectedIndex)
+                }
+              }
+
+              Rectangle {
+                width: parent.width
+                height: 1
+                color: root.foreground
+                opacity: 0.12
+              }
+            }
+
+            // The whole dialogue, virtualized: only visible turns are
+            // instantiated, so a 250-turn conversation costs nothing.
+            ListView {
+              id: previewList
+              anchors.top: previewHeader.bottom
+              anchors.topMargin: previewHeader.visible ? Style.spacing.md : 0
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              visible: root.selectedSkill === null
+              clip: true
+              // Style.spacing tokens are tiny (sm = 4px): a real breath
+              // between two messages needs an explicit value.
+              spacing: Style.space(24)
+              model: root.previewTurns
+              boundsBehavior: Flickable.StopAtBounds
+              // Land on the most recent turn; scroll back up to the start.
+              onCountChanged: if (count > 0)
+                Qt.callLater(function() { previewList.positionViewAtEnd() })
+
+              delegate: Column {
+                required property var modelData
+                width: previewList.width
+                spacing: Style.space(4)
+
+                Text {
+                  width: parent.width
+                  text: (parent.modelData.who === "you" ? "YOU" : "CLAUDE")
+                    + (parent.modelData.time ? "  ·  " + parent.modelData.time : "")
+                  color: parent.modelData.who === "you" ? root.selectedText : root.foreground
+                  opacity: parent.modelData.who === "you" ? 0.9 : 0.45
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.letterSpacing: 2
+                }
+
+                Text {
+                  width: parent.width
+                  text: parent.modelData.text
+                  color: root.foreground
+                  opacity: 0.75
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  wrapMode: Text.Wrap
+                }
+              }
+            }
 
             Text {
-              width: parent.width
-              visible: root.previewFirst !== ""
-              text: "FIRST PROMPT"
+              anchors.centerIn: parent
+              visible: root.selectedSkill === null && root.previewTurns.length === 0
+              text: root.previewLoading ? "…"
+                : (root.selectedSession ? "(nothing to preview)" : "")
               color: root.foreground
               opacity: 0.4
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.letterSpacing: 2
-            }
-
-            Text {
-              width: parent.width
-              visible: root.previewFirst !== ""
-              text: root.previewFirst
-              color: root.foreground
-              opacity: 0.75
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              wrapMode: Text.Wrap
-              maximumLineCount: 9
-              elide: Text.ElideRight
-            }
-
-            Text {
-              width: parent.width
-              visible: root.previewLast !== ""
-              text: "LAST PROMPT"
-              color: root.foreground
-              opacity: 0.4
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.letterSpacing: 2
-            }
-
-            Text {
-              width: parent.width
-              visible: root.previewLast !== ""
-              text: root.previewLast
-              color: root.foreground
-              opacity: 0.75
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              wrapMode: Text.Wrap
-              maximumLineCount: 7
-              elide: Text.ElideRight
-            }
-
-            Text {
-              width: parent.width
-              visible: root.selectedSession !== null && root.previewFirst === ""
-              text: "(no prompts recorded)"
-              color: root.foreground
-              opacity: 0.4
-              font.family: root.fontFamily
               font.pixelSize: Style.font.body
             }
 
-            Text {
-              width: parent.width
+            Column {
               visible: root.selectedSkill !== null
-              text: "LOCATION"
-              color: root.foreground
-              opacity: 0.4
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.letterSpacing: 2
-            }
+              anchors.fill: parent
+              spacing: Style.spacing.sm
 
-            Text {
-              width: parent.width
-              visible: root.selectedSkill !== null
-              text: root.selectedSkill ? root.homeAbbrev(root.selectedSkill.dir) : ""
-              color: root.foreground
-              opacity: 0.75
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              wrapMode: Text.WrapAnywhere
-              maximumLineCount: 2
-              elide: Text.ElideRight
-            }
+              Text {
+                width: parent.width
+                text: "LOCATION"
+                color: root.foreground
+                opacity: 0.4
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.letterSpacing: 2
+              }
 
-            Text {
-              width: parent.width
-              visible: root.selectedSkill !== null
-              text: "DESCRIPTION"
-              color: root.foreground
-              opacity: 0.4
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.letterSpacing: 2
-            }
+              Text {
+                width: parent.width
+                text: root.selectedSkill ? root.homeAbbrev(root.selectedSkill.dir) : ""
+                color: root.foreground
+                opacity: 0.75
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.WrapAnywhere
+                maximumLineCount: 2
+                elide: Text.ElideRight
+              }
 
-            Text {
-              width: parent.width
-              visible: root.selectedSkill !== null
-              text: root.selectedSkill ? (root.selectedSkill.description || "—") : ""
-              color: root.foreground
-              opacity: 0.75
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              wrapMode: Text.Wrap
-              maximumLineCount: 16
-              elide: Text.ElideRight
+              Text {
+                width: parent.width
+                text: "DESCRIPTION"
+                color: root.foreground
+                opacity: 0.4
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.letterSpacing: 2
+              }
+
+              Text {
+                width: parent.width
+                text: root.selectedSkill ? (root.selectedSkill.description || "—") : ""
+                color: root.foreground
+                opacity: 0.75
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.Wrap
+                maximumLineCount: 16
+                elide: Text.ElideRight
+              }
             }
           }
         }

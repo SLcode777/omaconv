@@ -4,12 +4,20 @@
 Keeps only what a human wrote or read: user text and assistant text.
 Tool results, thinking blocks, tool calls and command wrappers are noise
 and are dropped. Tolerant parsing, stdlib only (PRD §9).
+
+Default: the full dialogue on stdout (used by omaconv-grep).
+--preview: every turn as JSON, each clipped, for the palette's preview
+pane (its list view only instantiates the visible rows).
 """
 
 import json
 import sys
 
-NOISE_PREFIXES = ("<command-", "<local-command", "Caveat:", "<system-reminder", "<task-notification")
+NOISE_PREFIXES = ("<command-", "<local-command", "Caveat:", "<system-reminder",
+                  "<task-notification", "[Request interrupted")
+# Safety cap only: above the longest real turn observed (28k chars), so
+# messages are never visibly truncated — it just bounds pathological pastes.
+PREVIEW_CLIP = 32000
 
 
 def message_texts(content):
@@ -25,13 +33,9 @@ def message_texts(content):
     return out
 
 
-def render(path, out):
-    try:
-        fh = open(path, encoding="utf-8", errors="replace")
-    except OSError as e:
-        print("omaconv-render: " + str(e), file=sys.stderr)
-        return 1
-    with fh:
+def iter_turns(path):
+    """Yield {who, time, text} for each human-visible turn, in file order."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
                 obj = json.loads(line)
@@ -50,19 +54,55 @@ def render(path, out):
             if not parts:
                 continue
             stamp = obj.get("timestamp")
-            stamp = " " + stamp[:16].replace("T", " ") if isinstance(stamp, str) else ""
-            who = "YOU" if kind == "user" else "CLAUDE"
+            when = stamp[:16].replace("T", " ") if isinstance(stamp, str) else ""
+            yield {"who": "you" if kind == "user" else "claude",
+                   "time": when,
+                   "text": "\n".join(p.rstrip() for p in parts)}
+
+
+def clip(text, limit):
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1].rstrip() + "…"
+
+
+def render(path, out):
+    try:
+        for turn in iter_turns(path):
+            who = "YOU" if turn["who"] == "you" else "CLAUDE"
+            stamp = " " + turn["time"] if turn["time"] else ""
             out.write("\n───── " + who + stamp + " ─────\n\n")
-            for part in parts:
-                out.write(part.rstrip() + "\n")
+            out.write(turn["text"] + "\n")
+    except OSError as e:
+        print("omaconv-render: " + str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+def preview(path, out, clip_chars=PREVIEW_CLIP):
+    try:
+        turns = list(iter_turns(path))
+    except OSError as e:
+        print("omaconv-render: " + str(e), file=sys.stderr)
+        return 1
+    payload = {"turns": [
+        {"who": t["who"], "time": t["time"], "text": clip(t["text"], clip_chars)}
+        for t in turns]}
+    json.dump(payload, out, ensure_ascii=False)
+    out.write("\n")
     return 0
 
 
 def main(argv):
-    if len(argv) != 2:
-        print("usage: omaconv-render <transcript.jsonl>", file=sys.stderr)
+    args = argv[1:]
+    as_preview = "--preview" in args
+    paths = [a for a in args if a != "--preview"]
+    if len(paths) != 1:
+        print("usage: omaconv-render [--preview] <transcript.jsonl>", file=sys.stderr)
         return 2
-    return render(argv[1], sys.stdout)
+    if as_preview:
+        return preview(paths[0], sys.stdout)
+    return render(paths[0], sys.stdout)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,9 @@ Open the palette and just type — the search line is the input. The empty
 palette shows your pinned conversations, then the 10 most recent grouped by
 date (TODAY / YESTERDAY / THIS WEEK / OLDER). A result matched through a
 prompt shows the matching excerpt with the term highlighted, so you always
-know why a row is there.
+know why a row is there. The right pane previews the selected conversation
+as a readable YOU/CLAUDE dialogue — opened on the latest exchange, and
+scrollable all the way back to the first one.
 
 | Key      | Action                                                        |
 | -------- | ------------------------------------------------------------- |
