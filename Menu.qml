@@ -78,6 +78,9 @@ Item {
   property color scrim: Color.menu.scrim
   property color selectedBackground: Color.menu.selectedBackground
   property color selectedText: Color.menu.selectedText
+  // The theme's second hue: the "active" accent the bar uses (urgent by
+  // default) — visibly distinct from selectedText in most themes.
+  property color highlight: Color.bar.active
   readonly property int cornerRadius: Style.cornerRadius
   property string fontFamily: Style.font.menuFamily
   // Airy layout, design-inspo/raindrop: the palette takes ~2/3 of the
@@ -442,19 +445,25 @@ Item {
       parts.push("<font color=\"" + accent + "\">" + pairs[i][0] + "</font>"
         + "<font color=\"" + dim + "\"> " + pairs[i][1] + "</font>")
     }
-    return parts.join("<font color=\"" + dim + "\">  ·  </font>")
+    return parts.join("<font color=\"" + ("" + root.highlight) + "\">  ·  </font>")
   }
 
   function dimText(text) {
     return "<font color=\"" + ("" + dimColor()) + "\">" + text + "</font>"
   }
 
+  function escapeHtml(text) {
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  }
+
+  // Styled text: consumers must set textFormat: Text.StyledText.
   function subtitleFor(s) {
     // ↪ marks a fallback: the home dir is gone, resume lands elsewhere —
     // shown, never silent (PRD §5).
-    var parts = [s.cwdFallback ? "↪ " + homeAbbrev(s.resumeCwd) : homeAbbrev(s.cwd)]
-    if (s.running) parts.unshift("● live" + (s.running === "bg" ? " (bg)" : ""))
-    if (s.gitBranch) parts.push(s.gitBranch)
+    var parts = [escapeHtml(s.cwdFallback ? "↪ " + homeAbbrev(s.resumeCwd) : homeAbbrev(s.cwd))]
+    if (s.running) parts.unshift("<font color=\"" + ("" + root.highlight) + "\">● live"
+      + (s.running === "bg" ? " (bg)" : "") + "</font>")
+    if (s.gitBranch) parts.push(escapeHtml(s.gitBranch))
     var when = relativeDate(s.lastActivity)
     if (when) parts.push(when)
     return parts.join("  ·  ")
@@ -725,8 +734,8 @@ Item {
           visible: root.skillMode || root.filterText !== ""
           width: parent.width
           text: root.skillMode ? "SKILLS" : "RESULTS"
-          color: root.foreground
-          opacity: 0.4
+          color: root.selectedText
+          opacity: 0.7
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
           font.letterSpacing: 2
@@ -776,8 +785,8 @@ Item {
               anchors.bottom: parent.bottom
               anchors.bottomMargin: Style.space(4)
               text: row.isHeader ? modelData.header : ""
-              color: root.foreground
-              opacity: 0.4
+              color: root.selectedText
+              opacity: 0.7
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               font.letterSpacing: 2
@@ -792,7 +801,7 @@ Item {
               anchors.left: parent.left
               anchors.leftMargin: Style.space(4)
               radius: width / 2
-              color: root.selectedText
+              color: root.highlight
             }
 
             Column {
@@ -809,7 +818,7 @@ Item {
                 width: parent.width
                 text: row.isSkill ? "/" + row.modelData.skill.name
                   : (row.session ? (row.session.title || row.session.id) : "")
-                color: row.current ? root.selectedText : root.foreground
+                color: row.current ? root.highlight : root.foreground
                 opacity: row.resumable ? 1 : 0.4
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.heading
@@ -818,8 +827,9 @@ Item {
 
               Text {
                 width: parent.width
+                textFormat: Text.StyledText
                 text: row.isSkill
-                  ? root.homeAbbrev(row.modelData.skill.dir) + "  ·  " + (row.modelData.skill.description || "—")
+                  ? root.escapeHtml(root.homeAbbrev(row.modelData.skill.dir) + "  ·  " + (row.modelData.skill.description || "—"))
                   : (row.session ? root.subtitleFor(row.session) : "")
                 color: row.current ? root.selectedText : root.foreground
                 opacity: row.resumable ? 0.58 : 0.3
@@ -938,15 +948,17 @@ Item {
               radius: 0
               color: btn.enabled && btnMouse.containsMouse
                 ? root.selectedBackground : "transparent"
-              border.color: root.foreground
+              border.color: btn.enabled && btnMouse.containsMouse
+                ? root.highlight : root.foreground
               border.width: 1
-              opacity: btn.enabled ? (btnMouse.containsMouse ? 0.9 : 0.55) : 0.25
+              opacity: btn.enabled ? (btnMouse.containsMouse ? 0.95 : 0.55) : 0.25
 
               Text {
                 id: btnText
                 anchors.centerIn: parent
                 text: (btn.icon ? btn.icon + " " : "") + btn.label
-                color: root.foreground
+                color: btn.enabled && btnMouse.containsMouse
+                  ? root.highlight : root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 font.letterSpacing: 1
@@ -984,6 +996,7 @@ Item {
 
               Text {
                 width: parent.width
+                textFormat: Text.StyledText
                 text: root.selectedSession ? root.subtitleFor(root.selectedSession) : ""
                 color: root.foreground
                 opacity: 0.58
@@ -1080,8 +1093,8 @@ Item {
                   width: parent.width
                   text: (parent.modelData.who === "you" ? "YOU" : "CLAUDE")
                     + (parent.modelData.time ? "  ·  " + parent.modelData.time : "")
-                  color: parent.modelData.who === "you" ? root.selectedText : root.foreground
-                  opacity: parent.modelData.who === "you" ? 0.9 : 0.45
+                  color: root.selectedText
+                  opacity: 0.9
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   font.letterSpacing: 2
@@ -1118,8 +1131,8 @@ Item {
               Text {
                 width: parent.width
                 text: "LOCATION"
-                color: root.foreground
-                opacity: 0.4
+                color: root.selectedText
+                opacity: 0.7
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.letterSpacing: 2
@@ -1140,8 +1153,8 @@ Item {
               Text {
                 width: parent.width
                 text: "DESCRIPTION"
-                color: root.foreground
-                opacity: 0.4
+                color: root.selectedText
+                opacity: 0.7
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.letterSpacing: 2
