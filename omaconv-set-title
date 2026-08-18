@@ -29,7 +29,12 @@ def main(argv):
         )
     )
     # O_APPEND: atomic for a short write, safe next to a live session writer.
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    # O_NOFOLLOW: a planted symlink must not redirect the append elsewhere.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+    except OSError as e:
+        print("omaconv-set-title: " + str(e), file=sys.stderr)
+        return 1
     try:
         os.write(fd, payload.encode("utf-8"))
     finally:

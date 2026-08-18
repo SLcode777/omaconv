@@ -74,6 +74,8 @@ Item {
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: parent.top
+          // Messages may quote a transcript-derived title: never AutoText.
+          textFormat: Text.PlainText
           text: root.message
           color: root.foreground
           font.family: root.fontFamily

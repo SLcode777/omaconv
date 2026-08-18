@@ -740,6 +740,7 @@ Item {
             anchors.right: escBadge.left
             anchors.rightMargin: Style.spacing.md
             anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
             text: root.filterText || ("Search " + root.sessions.length + " conversations OR type \"/\" for skills…")
             color: root.foreground
             opacity: root.filterText ? 1 : 0.5
@@ -873,8 +874,13 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(3)
 
+              // PlainText wherever transcript-derived text lands: the
+              // AutoText default renders it as rich text and Qt would
+              // fetch any <img> URL it contains — network egress from
+              // untrusted content. StyledText sinks escape instead.
               Text {
                 width: parent.width
+                textFormat: Text.PlainText
                 text: row.isSkill ? "/" + row.modelData.skill.name
                   : (row.session ? (row.session.title || row.session.id) : "")
                 color: row.current ? root.highlight : root.foreground
@@ -917,6 +923,7 @@ Item {
               Text {
                 visible: row.inlinePreview && root.previewFirst !== ""
                 width: parent.width
+                textFormat: Text.PlainText
                 text: "› " + root.previewFirst
                 color: root.selectedText
                 opacity: 0.75
@@ -929,6 +936,7 @@ Item {
               Text {
                 visible: row.inlinePreview && root.previewLast !== ""
                 width: parent.width
+                textFormat: Text.PlainText
                 text: "» " + root.previewLast
                 color: root.selectedText
                 opacity: 0.75
@@ -964,6 +972,7 @@ Item {
             Text {
               anchors.centerIn: parent
               visible: root.results.length === 0
+              textFormat: Text.PlainText
               text: root.filterText
                 ? "No matches for “" + root.filterText + "”"
                 : "No conversations indexed yet"
@@ -1043,6 +1052,7 @@ Item {
 
               Text {
                 width: parent.width
+                textFormat: Text.PlainText
                 text: root.selectedSession
                   ? (root.selectedSession.title || root.selectedSession.id) : ""
                 color: root.foreground
@@ -1153,6 +1163,7 @@ Item {
 
                 Text {
                   width: parent.width
+                  textFormat: Text.PlainText
                   text: (parent.modelData.who === "you" ? "YOU" : String(parent.modelData.who).toUpperCase())
                     + (parent.modelData.time ? "  ·  " + parent.modelData.time : "")
                   color: root.selectedText
@@ -1164,6 +1175,7 @@ Item {
 
                 Text {
                   width: parent.width
+                  textFormat: Text.PlainText
                   text: parent.modelData.text
                   color: root.foreground
                   opacity: 0.75
@@ -1177,6 +1189,7 @@ Item {
             Text {
               anchors.centerIn: parent
               visible: root.selectedSkill === null && root.previewTurns.length === 0
+              textFormat: Text.PlainText
               text: root.previewLoading ? "…"
                 : (root.selectedSession ? "(nothing to preview)" : "")
               color: root.foreground
@@ -1199,6 +1212,7 @@ Item {
 
               Text {
                 width: parent.width
+                textFormat: Text.PlainText
                 text: root.selectedSkill ? "/" + root.selectedSkill.name : ""
                 color: root.foreground
                 font.family: root.fontFamily
@@ -1209,6 +1223,7 @@ Item {
               Text {
                 width: parent.width
                 visible: !!(root.selectedSkill && root.selectedSkill.description)
+                textFormat: Text.PlainText
                 text: root.selectedSkill ? (root.selectedSkill.description || "") : ""
                 color: root.foreground
                 opacity: 0.75
@@ -1221,6 +1236,7 @@ Item {
 
               Text {
                 width: parent.width
+                textFormat: Text.PlainText
                 text: root.selectedSkill ? root.homeAbbrev(root.selectedSkill.dir) : ""
                 color: root.foreground
                 opacity: 0.58
@@ -1276,6 +1292,7 @@ Item {
                 // (name, description): only the body is worth reading.
                 Text {
                   width: parent.width
+                  textFormat: Text.PlainText
                   text: root.previewSkillDoc ? (root.previewSkillDoc.body || "") : ""
                   color: root.foreground
                   opacity: 0.75
@@ -1431,6 +1448,7 @@ Item {
 
       Text {
         width: parent.width
+        textFormat: Text.PlainText
         text: root.renameSession ? (root.renameSession.title || root.renameSession.id) : ""
         color: root.foreground
         opacity: 0.58
@@ -1455,6 +1473,7 @@ Item {
           anchors.leftMargin: Style.space(14)
           anchors.rightMargin: Style.space(14)
           anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
           text: root.renameText ? root.renameText + "▏" : "New title…"
           color: root.foreground
           opacity: root.renameText ? 1 : 0.4
